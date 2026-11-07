@@ -1,0 +1,32 @@
+# Build outputs & dependencies
+node_modules/
+dist/
+build/
+bin/
+obj/
+out/
+Release/
+Debug/
+x64/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+
+# Temporary conversion & runtime workspace files
+.playwright-cli/
+.fileshift.tmp.*
+*.tmp
+workspace-runtime/
+public/downloads/*.tar.gz
+
+# Environment & credentials
+.env
+.env.local
+*.pfx
+*.cer
+
+# OS metadata
+.DS_Store
+Thumbs.db
