@@ -103,4 +103,5 @@ export const TRANSLATIONS = {
   },
 } as const;
 
-export type TranslationDict = (typeof TRANSLATIONS)['es'];
+export type TranslationDict = Record<keyof (typeof TRANSLATIONS)['es'], string>;
+

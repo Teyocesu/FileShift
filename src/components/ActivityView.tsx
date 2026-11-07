@@ -395,8 +395,8 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
           aria-label="Subir archivos desde tu dispositivo"
         />
 
-        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-5">
-          <div className="flex items-center gap-4 min-w-0 flex-1">
+        <div className="space-y-4">
+          <div className="flex items-center gap-4 min-w-0">
             <div className="w-11 h-11 rounded-xl bg-teal-500/10 border border-teal-500/30 flex items-center justify-center shrink-0">
               <Layers className="w-5 h-5 text-teal-400" />
             </div>
@@ -406,7 +406,7 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 shrink-0">
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[#1E2532]">
             <div className="flex items-center gap-2">
               <label htmlFor="select-upload-format" className="text-xs text-slate-400">
                 Destino:
