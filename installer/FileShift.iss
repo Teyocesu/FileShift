@@ -5,13 +5,15 @@
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "FileShift Open Source"
 #define MyAppExeName "FileShift.App.exe"
+#define MyCliExeName "fileshift.exe"
 
 [Setup]
 AppId={{8F9C32E1-45B2-4F81-A09E-7C5D1B90E112}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={autopf}\{#MyAppName}
+LicenseFile=..\LICENSE
+DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -31,8 +33,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 Source: "..\dist\win-x64\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "AppxManifest.xml"; DestDir: "{app}"; Flags: ignoreversion
+Source: "Assets\*"; DestDir: "{app}\Assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "Register-SparsePackage.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Unregister-SparsePackage.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
@@ -41,13 +45,13 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "classicmenu"; Description: "Registrar también menú contextual clásico de respaldo"; GroupDescription: "Integración con Windows Explorer:"
+Name: "classicmenu"; Description: "Registrar también menú contextual clásico de respaldo (Show more options)"; GroupDescription: "Integración con Windows Explorer:"
 
 [Registry]
-; Respaldo reversible opcional en el menú clásico (sin afectar al menú moderno IExplorerCommand)
-Root: HKCU; Subkey: "Software\Classes\*\shell\FileShift"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Convertir con FileShift"; Flags: uninsdeletekey; Tasks: classicmenu
+; Respaldo reversible opcional en el menú clásico (HKCU, sin requerir UAC elevado)
+Root: HKCU; Subkey: "Software\Classes\*\shell\FileShift"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Convertir a WebP con FileShift"; Flags: uninsdeletekey; Tasks: classicmenu
 Root: HKCU; Subkey: "Software\Classes\*\shell\FileShift"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\{#MyAppExeName}"",0"; Flags: uninsdeletekey; Tasks: classicmenu
-Root: HKCU; Subkey: "Software\Classes\*\shell\FileShift\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Flags: uninsdeletekey; Tasks: classicmenu
+Root: HKCU; Subkey: "Software\Classes\*\shell\FileShift\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyCliExeName}"" convert --to webp -- ""%1"""; Flags: uninsdeletekey; Tasks: classicmenu
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Register-SparsePackage.ps1"" -InstallDir ""{app}"""; StatusMsg: "Registrando integración con el menú contextual moderno de Windows 11..."; Flags: runhidden waituntilterminated

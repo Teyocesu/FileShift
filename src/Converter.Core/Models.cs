@@ -51,7 +51,8 @@ public sealed record ConversionOptions(
     string? PageRange = null,
     ConflictPolicy ConflictPolicy = ConflictPolicy.AutoRename,
     string? CustomOutputDirectory = null,
-    string? PresetName = null
+    string? PresetName = null,
+    string TriggeredBy = "CLI"
 );
 
 public sealed record ConversionPreset(
@@ -74,17 +75,22 @@ public sealed record AutomationRule(
     string? PresetId,
     string? OutputDirectory,
     ConflictPolicy ConflictPolicy,
+    bool CopyConvertedFile = false,
     string? LastResult = null,
-    DateTimeOffset? LastTriggeredAt = null
+    DateTimeOffset? LastTriggeredAt = null,
+    int ConvertedCount = 0
 );
 
 public sealed class ConversionJob
 {
     public string Id { get; init; } = Guid.NewGuid().ToString("N")[..12];
     public required string InputPath { get; init; }
-    public required string SourceFormat { get; init; }
+    public string FileName => Path.GetFileName(InputPath);
+    public required string SourceFormat { get; set; }
     public required string TargetFormat { get; init; }
     public string? OutputPath { get; set; }
+    public string? OutputFileName => OutputPath is not null ? Path.GetFileName(OutputPath) : null;
+    public List<string> AdditionalOutputPaths { get; init; } = [];
     public string EngineUsed { get; set; } = "Pending";
     public JobStatus Status { get; set; } = JobStatus.Queued;
     public double ProgressPercent { get; set; }
@@ -95,14 +101,16 @@ public sealed class ConversionJob
     public long InputSizeBytes { get; set; }
     public long? OutputSizeBytes { get; set; }
     public string? OriginalSha256 { get; set; }
+    public string? PostOriginalSha256 { get; set; }
     public bool OriginalIntactVerified { get; set; }
+    public string? ProbeSummary { get; set; }
     public ConversionOptions Options { get; init; } = new();
 }
 
 public sealed class UserSettings
 {
     public bool SaveNextToOriginal { get; set; } = true;
-    public string? CustomOutputDirectory { get; set; }
+    public string CustomOutputDirectory { get; set; } = "";
     public int DefaultQuality { get; set; } = 85;
     public int MaxConcurrency { get; set; } = Math.Clamp(Environment.ProcessorCount / 2, 2, 8);
     public ConflictPolicy DefaultConflictPolicy { get; set; } = ConflictPolicy.AutoRename;
@@ -111,26 +119,43 @@ public sealed class UserSettings
     public bool KeepRunningInBackground { get; set; } = true;
     public bool LaunchAtWindowsStartup { get; set; } = false;
     public bool ContextMenuEnabled { get; set; } = true;
+    public bool ClassicMenuFallbackEnabled { get; set; } = false;
     public string Language { get; set; } = "es";
 
-    public Dictionary<string, List<string>> MenuFavorites { get; set; } = new()
+    public Dictionary<string, List<string>> MenuFavorites { get; set; } = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["image"] = ["jpeg", "png", "webp", "avif"],
+        ["image"] = ["jpeg", "png", "webp"],
         ["svg"] = ["png", "jpeg", "webp"],
         ["video"] = ["mp4", "mov", "gif", "mp3"],
-        ["audio"] = ["mp3", "m4a", "wav", "flac"],
-        ["pdf"] = ["png", "jpeg"]
+        ["audio"] = ["mp3", "m4a", "wav"],
+        ["pdf"] = ["png", "jpeg"],
+        ["document"] = ["pdf"]
     };
 
     public List<ConversionPreset> Presets { get; set; } =
     [
-        new("preset-web-webp", "Imagen para Web (WebP)", "webp", 82, 1920, null),
-        new("preset-hq-jpeg", "JPEG Alta Calidad", "jpeg", 92, null, null),
-        new("preset-video-mp4", "Video MP4 Compatible", "mp4", 80, 1920, 192),
-        new("preset-audio-mp3", "Audio MP3 192 kbps", "mp3", 85, null, 192)
+        new("preset-web-webp", "Imagen para Web (WebP)", "webp", 82, 1920, null, true),
+        new("preset-jpeg-hq", "JPEG de Calidad Alta", "jpeg", 92, null, null, false),
+        new("preset-video-mp4", "Video MP4 Compatible (H.264)", "mp4", 80, 1280, 192, false),
+        new("preset-audio-mp3", "Audio MP3 192 kbps", "mp3", 85, null, 192, false)
     ];
 
     public List<AutomationRule> Automations { get; set; } = [];
+}
+
+public sealed record OutputValidationResult(
+    bool IsValid,
+    string? Summary = null,
+    string? FailureReason = null
+);
+
+public interface IOutputIntegrityValidator
+{
+    Task<OutputValidationResult> ValidateOutputAsync(
+        string filePath,
+        string expectedTargetFormat,
+        CancellationToken ct = default
+    );
 }
 
 public interface IConversionEngineAdapter

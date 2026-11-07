@@ -63,6 +63,14 @@ function loadSettings(): UserSettings {
 function saveSettings(settings: UserSettings): void {
   fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf8');
+  const menuCacheLines = [
+    `ENABLED=${settings.contextMenuEnabled ? '1' : '0'}`,
+    `LANG=${settings.language || 'es'}`,
+    ...(['image', 'svg', 'video', 'audio', 'pdf', 'document'] as const).map(
+      (cat) => `FAV_${cat}=${(settings.menuFavorites[cat] || []).join(',')}`
+    ),
+  ];
+  fs.writeFileSync(path.join(RUNTIME_DIR, 'menu-cache.json'), menuCacheLines.join('\n') + '\n', 'utf8');
 }
 
 let currentSettings = loadSettings();
@@ -122,16 +130,19 @@ const NATIVE_REPO_FILES = [
   { path: 'src/Converter.Core/MagicByteInspector.cs', category: 'Converter.Core (C#)', description: 'Inspección de cabeceras binarias (Magic Bytes) para validación real' },
   { path: 'src/Converter.Core/FormatMatrix.cs', category: 'Converter.Core (C#)', description: 'Matriz de conversiones compatibles por categoría y motor' },
   { path: 'src/Converter.Core/SafeFilePolicy.cs', category: 'Converter.Core (C#)', description: 'Invariante SHA-256 del archivo original, temporales atómicos y política anti-colisión' },
-  { path: 'src/Converter.Core/ConversionQueue.cs', category: 'Converter.Core (C#)', description: 'Cola concurrente con semáforo, cancelación y validación post-conversión' },
+  { path: 'src/Converter.Core/ConversionQueue.cs', category: 'Converter.Core (C#)', description: 'Cola concurrente con validación profunda previa a publicación atómica' },
+  { path: 'src/Converter.Core/UserSettingsStore.cs', category: 'Converter.Core (C#)', description: 'Persistencia de settings.json y sincronización de menu-cache.json para Explorer' },
   { path: 'src/Converter.Core/FolderAutomationService.cs', category: 'Converter.Core (C#)', description: 'Vigilancia con FileSystemWatcher, estabilidad de escritura y prevención de bucles' },
+  { path: 'src/Converter.Infrastructure/OutputIntegrityValidator.cs', category: 'Infrastructure (C#)', description: 'Validador profundo pre-publicación mediante identify, ffprobe y Ghostscript' },
   { path: 'src/Converter.Infrastructure/FFmpegAdapter.cs', category: 'Infrastructure (C#)', description: 'Adaptador FFmpeg/ffprobe con ArgumentList seguro y paleta GIF en 2 pasos' },
-  { path: 'src/Converter.Infrastructure/ImageMagickAdapter.cs', category: 'Infrastructure (C#)', description: 'Adaptador ImageMagick 7 con auto-orientación EXIF y compositing de alfa' },
-  { path: 'src/Converter.Infrastructure/PdfAdapter.cs', category: 'Infrastructure (C#)', description: 'Adaptador PDF con aislamiento -dSAFER y soporte de rango de páginas' },
+  { path: 'src/Converter.Infrastructure/ImageMagickAdapter.cs', category: 'Infrastructure (C#)', description: 'Adaptador ImageMagick con auto-orientación EXIF, compositing de alfa y PDF 1.4' },
+  { path: 'src/Converter.Infrastructure/PdfAdapter.cs', category: 'Infrastructure (C#)', description: 'Adaptador PDF multipágina con aislamiento -dSAFER y soporte de rango de páginas' },
   { path: 'src/Converter.Infrastructure/LibreOfficeAdapter.cs', category: 'Infrastructure (C#)', description: 'Adaptador opcional para LibreOffice Headless (DOCX/ODT/XLSX/PPTX -> PDF)' },
-  { path: 'src/Converter.Cli/Program.cs', category: 'Converter.Cli (C#)', description: 'Ejecutable CLI nativo (fileshift convert | formats | doctor)' },
-  { path: 'src/Converter.App/MainWindow.xaml', category: 'Converter.App (WPF)', description: 'Ventana principal WPF con soporte DPI PerMonitorV2 y Drag & Drop' },
-  { path: 'src/Converter.App/MainWindow.xaml.cs', category: 'Converter.App (WPF)', description: 'Lógica de interfaz WPF conectada a ConversionQueue' },
-  { path: 'tests/Converter.Tests/ConversionPipelineTests.cs', category: 'Tests (xUnit)', description: 'Pruebas de invariantes en C#/.NET' },
+  { path: 'src/Converter.Cli/Program.cs', category: 'Converter.Cli (C#)', description: 'Ejecutable CLI nativo .NET 10 (fileshift convert | formats | doctor)' },
+  { path: 'src/Converter.App/MainWindow.xaml', category: 'Converter.App (WPF)', description: 'Ventana principal WPF compilada con paneles de Actividad, Automatizaciones, Menú y Presets' },
+  { path: 'src/Converter.App/MainWindow.xaml.cs', category: 'Converter.App (WPF)', description: 'Lógica completa de aplicación de escritorio WPF conectada al núcleo C#' },
+  { path: 'tests/Converter.Tests/ConversionPipelineTests.cs', category: 'Tests (xUnit)', description: 'Suite de pruebas xUnit C# de invariantes P0, colisiones, PDF multipágina y medios reales' },
+  { path: 'LICENSE', category: 'Canonical Docs', description: 'Licencia MIT del proyecto FileShift' },
   { path: 'SPEC.md', category: 'Canonical Docs', description: 'Especificación técnica, arquitectura COM y tabla de criterios AC-01 a AC-16' },
   { path: 'PLAN.md', category: 'Canonical Docs', description: 'Plan de ingeniería por fases (Fase A a Fase E) y estado' },
   { path: 'HANDOFF.md', category: 'Canonical Docs', description: 'Estado actual, evidencia de pruebas y guía para QA físico en Windows 11' },
@@ -575,6 +586,7 @@ async function startServer() {
       return;
     }
 
+    const dotnetCliDll = path.join(ROOT_DIR, 'src', 'Converter.Cli', 'bin', 'Release', 'net10.0', 'fileshift.dll');
     const cliScript = path.join(ROOT_DIR, 'cli', 'fileshift-cli.ts');
     const resolvedArgs = args.map((token) => {
       if (fs.existsSync(path.join(SAMPLES_DIR, token))) {
@@ -583,9 +595,9 @@ async function startServer() {
       return token;
     });
 
-    const proc = await spawnSafeProcess('npx', ['tsx', cliScript, ...resolvedArgs], {
-      timeoutMs: 25000,
-    });
+    const proc = fs.existsSync(dotnetCliDll)
+      ? await spawnSafeProcess('dotnet', [dotnetCliDll, ...resolvedArgs], { timeoutMs: 25000 })
+      : await spawnSafeProcess('npx', ['tsx', cliScript, ...resolvedArgs], { timeoutMs: 25000 });
 
     res.json({
       command: `fileshift ${args.join(' ')}`,

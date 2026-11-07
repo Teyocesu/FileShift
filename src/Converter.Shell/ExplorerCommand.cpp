@@ -4,14 +4,163 @@
 #include <cwctype>
 #include <fstream>
 #include <sstream>
+#include <map>
 
 namespace
 {
+    struct MenuCacheConfig
+    {
+        bool enabled = true;
+        std::map<std::wstring, std::vector<std::wstring>> favoritesByCategory;
+    };
+
     std::wstring ToLower(std::wstring input)
     {
         std::transform(input.begin(), input.end(), input.begin(),
             [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
         return input;
+    }
+
+    std::wstring ToUpper(std::wstring input)
+    {
+        std::transform(input.begin(), input.end(), input.begin(),
+            [](wchar_t c) { return static_cast<wchar_t>(std::towupper(c)); });
+        return input;
+    }
+
+    std::wstring Utf8ToWide(const std::string& str)
+    {
+        if (str.empty()) return L"";
+        int count = MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), nullptr, 0);
+        if (count <= 0) return L"";
+        std::wstring result(static_cast<size_t>(count), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), result.data(), count);
+        return result;
+    }
+
+    std::string WideToUtf8(const std::wstring& wstr)
+    {
+        if (wstr.empty()) return "";
+        int count = WideCharToMultiByte(CP_UTF8, 0, wstr.data(), static_cast<int>(wstr.size()), nullptr, 0, nullptr, nullptr);
+        if (count <= 0) return "";
+        std::string result(static_cast<size_t>(count), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, wstr.data(), static_cast<int>(wstr.size()), result.data(), count, nullptr, nullptr);
+        return result;
+    }
+
+    std::wstring GetFileShiftLocalAppDataDir()
+    {
+        wchar_t buf[32768] = {};
+        DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, 32768);
+        if (len > 0 && len < 32768)
+        {
+            std::wstring dir(buf, len);
+            if (!dir.empty() && dir.back() != L'\\') dir.push_back(L'\\');
+            dir += L"FileShift";
+            return dir;
+        }
+        return L"";
+    }
+
+    void AppendShellErrorLog(const std::wstring& message)
+    {
+        std::wstring dir = GetFileShiftLocalAppDataDir();
+        if (dir.empty()) return;
+        CreateDirectoryW(dir.c_str(), nullptr);
+        std::wstring logPath = dir + L"\\shell-errors.log";
+
+        HANDLE hFile = CreateFileW(
+            logPath.c_str(),
+            FILE_APPEND_DATA,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr,
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+
+        if (hFile != INVALID_HANDLE_VALUE)
+        {
+            std::string utf8Line = WideToUtf8(message + L"\r\n");
+            DWORD written = 0;
+            WriteFile(hFile, utf8Line.data(), static_cast<DWORD>(utf8Line.size()), &written, nullptr);
+            CloseHandle(hFile);
+        }
+    }
+
+    std::vector<std::wstring> SplitCommaList(const std::wstring& csv)
+    {
+        std::vector<std::wstring> items;
+        std::wstringstream ss(csv);
+        std::wstring token;
+        while (std::getline(ss, token, L','))
+        {
+            size_t start = token.find_first_not_of(L" \t\r\n\"");
+            size_t end = token.find_last_not_of(L" \t\r\n\"");
+            if (start != std::wstring::npos && end != std::wstring::npos)
+            {
+                items.push_back(ToLower(token.substr(start, end - start + 1)));
+            }
+        }
+        return items;
+    }
+
+    MenuCacheConfig LoadMenuCacheConfig()
+    {
+        MenuCacheConfig cfg;
+        cfg.favoritesByCategory[L"image"] = { L"webp", L"jpeg", L"png", L"avif", L"pdf" };
+        cfg.favoritesByCategory[L"svg"] = { L"png", L"webp", L"jpeg", L"pdf" };
+        cfg.favoritesByCategory[L"video"] = { L"mp4", L"mov", L"webm", L"gif", L"mp3" };
+        cfg.favoritesByCategory[L"audio"] = { L"mp3", L"wav", L"flac", L"m4a", L"opus" };
+        cfg.favoritesByCategory[L"pdf"] = { L"png", L"jpeg" };
+        cfg.favoritesByCategory[L"document"] = { L"pdf" };
+
+        std::wstring dir = GetFileShiftLocalAppDataDir();
+        if (dir.empty()) return cfg;
+
+        std::wstring cachePath = dir + L"\\menu-cache.json";
+        HANDLE hFile = CreateFileW(
+            cachePath.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+
+        if (hFile == INVALID_HANDLE_VALUE) return cfg;
+
+        char buffer[8192] = {};
+        DWORD bytesRead = 0;
+        BOOL ok = ReadFile(hFile, buffer, sizeof(buffer) - 1, &bytesRead, nullptr);
+        CloseHandle(hFile);
+        if (!ok || bytesRead == 0) return cfg;
+
+        std::wstring content = Utf8ToWide(std::string(buffer, bytesRead));
+        std::wstringstream ss(content);
+        std::wstring line;
+        while (std::getline(ss, line))
+        {
+            if (!line.empty() && line.back() == L'\r') line.pop_back();
+            if (line == L"ENABLED=0" || line.find(L"\"enabled\": false") != std::wstring::npos)
+            {
+                cfg.enabled = false;
+            }
+            else if (line.rfind(L"FAV_", 0) == 0)
+            {
+                size_t eqPos = line.find(L'=');
+                if (eqPos != std::wstring::npos)
+                {
+                    std::wstring cat = ToLower(line.substr(4, eqPos - 4));
+                    auto parsed = SplitCommaList(line.substr(eqPos + 1));
+                    if (!parsed.empty())
+                    {
+                        cfg.favoritesByCategory[cat] = parsed;
+                    }
+                }
+            }
+        }
+
+        return cfg;
     }
 
     // Properly quotes and escapes a Win32 argument for CommandLineToArgvW without shell injection
@@ -56,7 +205,8 @@ namespace
     {
         if (ext == L".png" || ext == L".jpg" || ext == L".jpeg" || ext == L".webp" ||
             ext == L".avif" || ext == L".bmp" || ext == L".gif" || ext == L".tiff" ||
-            ext == L".ico" || ext == L".heic")
+            ext == L".ico" || ext == L".heic" || ext == L".tga" || ext == L".ppm" ||
+            ext == L".qoi" || ext == L".exr")
         {
             return L"image";
         }
@@ -78,77 +228,173 @@ namespace
         return L"";
     }
 
-    std::vector<TargetMenuEntry> BuildSubMenuForCategory(const std::wstring& category, const std::wstring& singleExt)
+    std::vector<std::wstring> GetAllSupportedTargetsForCategory(const std::wstring& category)
     {
-        std::vector<TargetMenuEntry> entries;
-
-        auto addTarget = [&](const std::wstring& fmt, const std::wstring& label)
-        {
-            std::wstring dotFmt = L"." + fmt;
-            if (dotFmt == singleExt || (fmt == L"jpeg" && singleExt == L".jpg"))
-                return;
-            entries.push_back({ fmt, label, false });
-        };
-
         if (category == L"image")
         {
-            addTarget(L"jpeg", L"Convertir a JPEG");
-            addTarget(L"png", L"Convertir a PNG");
-            addTarget(L"webp", L"Convertir a WebP");
-            addTarget(L"avif", L"Convertir a AVIF");
-            addTarget(L"bmp", L"Convertir a BMP");
-            addTarget(L"tiff", L"Convertir a TIFF");
-            addTarget(L"pdf", L"Convertir a PDF");
+            return { L"webp", L"jpeg", L"png", L"avif", L"gif", L"tiff", L"bmp", L"ico", L"tga", L"ppm", L"qoi", L"exr", L"pdf" };
         }
-        else if (category == L"svg")
+        if (category == L"svg")
         {
-            addTarget(L"png", L"Convertir a PNG");
-            addTarget(L"jpeg", L"Convertir a JPEG");
-            addTarget(L"webp", L"Convertir a WebP");
-            addTarget(L"pdf", L"Convertir a PDF");
+            return { L"png", L"webp", L"jpeg", L"pdf" };
         }
-        else if (category == L"video")
+        if (category == L"video")
         {
-            addTarget(L"mp4", L"Convertir a MP4");
-            addTarget(L"mov", L"Convertir a MOV");
-            addTarget(L"webm", L"Convertir a WebM");
-            addTarget(L"gif", L"Convertir a GIF");
-            addTarget(L"mp3", L"Extraer MP3");
-            addTarget(L"wav", L"Extraer WAV");
+            return { L"mp4", L"mov", L"webm", L"mkv", L"avi", L"gif", L"mp3", L"wav", L"flac", L"aac", L"m4a", L"ogg", L"opus" };
         }
-        else if (category == L"audio")
+        if (category == L"audio")
         {
-            addTarget(L"mp3", L"Convertir a MP3");
-            addTarget(L"m4a", L"Convertir a M4A");
-            addTarget(L"wav", L"Convertir a WAV");
-            addTarget(L"flac", L"Convertir a FLAC");
-            addTarget(L"opus", L"Convertir a Opus");
+            return { L"mp3", L"wav", L"flac", L"aac", L"m4a", L"ogg", L"opus" };
         }
-        else if (category == L"pdf")
+        if (category == L"pdf")
         {
-            addTarget(L"png", L"Convertir a PNG");
-            addTarget(L"jpeg", L"Convertir a JPEG");
+            return { L"png", L"jpeg" };
         }
-        else if (category == L"document")
+        if (category == L"document")
         {
-            addTarget(L"pdf", L"Convertir a PDF");
+            return { L"pdf" };
+        }
+        return {};
+    }
+
+    std::wstring FormatDisplayTitle(const std::wstring& category, const std::wstring& fmt)
+    {
+        if (category == L"video" &&
+            (fmt == L"mp3" || fmt == L"wav" || fmt == L"flac" || fmt == L"aac" || fmt == L"m4a" || fmt == L"ogg" || fmt == L"opus"))
+        {
+            return L"Extraer audio " + ToUpper(fmt);
+        }
+        return L"Convertir a " + ToUpper(fmt);
+    }
+
+    bool InspectSelectionCategory(IShellItemArray* psiItemArray, std::wstring& outCategory, std::wstring& outSingleExt)
+    {
+        outCategory.clear();
+        outSingleExt.clear();
+        if (!psiItemArray) return false;
+
+        DWORD count = 0;
+        if (FAILED(psiItemArray->GetCount(&count)) || count == 0)
+            return false;
+
+        for (DWORD i = 0; i < count; ++i)
+        {
+            IShellItem* psi = nullptr;
+            if (FAILED(psiItemArray->GetItemAt(i, &psi)) || !psi)
+                return false;
+
+            PWSTR pszName = nullptr;
+            HRESULT hr = psi->GetDisplayName(SIGDN_FILESYSPATH, &pszName);
+            psi->Release();
+
+            if (FAILED(hr) || !pszName)
+                return false;
+
+            LPCWSTR extPtr = PathFindExtensionW(pszName);
+            std::wstring ext = extPtr ? ToLower(extPtr) : L"";
+            CoTaskMemFree(pszName);
+
+            std::wstring category = ClassifyExtensionCategory(ext);
+            if (category.empty())
+                return false;
+
+            if (i == 0)
+            {
+                outCategory = category;
+                outSingleExt = ext;
+            }
+            else
+            {
+                if (category != outCategory)
+                    return false;
+                if (ext != outSingleExt)
+                    outSingleExt.clear();
+            }
         }
 
-        entries.push_back({ L"", L"Más formatos…", true });
+        return !outCategory.empty();
+    }
+
+    std::vector<TargetMenuEntry> BuildSubMenuForCategory(
+        const std::wstring& category,
+        const std::wstring& singleExt,
+        const MenuCacheConfig& cfg)
+    {
+        std::vector<TargetMenuEntry> entries;
+        auto allSupported = GetAllSupportedTargetsForCategory(category);
+        if (allSupported.empty()) return entries;
+
+        std::wstring lookupCat = (category == L"pdf") ? L"document" : category;
+        std::vector<std::wstring> favorites;
+        auto it = cfg.favoritesByCategory.find(lookupCat);
+        if (it != cfg.favoritesByCategory.end())
+        {
+            favorites = it->second;
+        }
+
+        auto isSameAsSource = [&](const std::wstring& fmt)
+        {
+            std::wstring dotFmt = L"." + fmt;
+            return (dotFmt == singleExt) || (fmt == L"jpeg" && singleExt == L".jpg");
+        };
+
+        std::vector<std::wstring> addedFormats;
+
+        // 1. Add user-configured favorite formats first (if valid for this category)
+        for (const auto& fav : favorites)
+        {
+            if (isSameAsSource(fav)) continue;
+            if (std::find(allSupported.begin(), allSupported.end(), fav) != allSupported.end() &&
+                std::find(addedFormats.begin(), addedFormats.end(), fav) == addedFormats.end())
+            {
+                entries.push_back({ fav, FormatDisplayTitle(category, fav), category, false, {} });
+                addedFormats.push_back(fav);
+            }
+        }
+
+        // 2. Group remaining supported formats into cascading submenu "Más formatos…"
+        std::vector<TargetMenuEntry> remainingEntries;
+        for (const auto& fmt : allSupported)
+        {
+            if (isSameAsSource(fmt)) continue;
+            if (std::find(addedFormats.begin(), addedFormats.end(), fmt) == addedFormats.end())
+            {
+                remainingEntries.push_back({ fmt, FormatDisplayTitle(category, fmt), category, false, {} });
+            }
+        }
+
+        // Always allow opening the full FileShift desktop app with the selected files
+        remainingEntries.push_back({ L"", L"Abrir en FileShift…", category, true, {} });
+
+        if (entries.empty())
+        {
+            // If all favorites matched source extension, promote remaining entries to top level
+            entries = std::move(remainingEntries);
+        }
+        else
+        {
+            entries.push_back({ L"", L"Más formatos…", category, true, std::move(remainingEntries) });
+        }
+
         return entries;
     }
 
     std::wstring ResolveExecutableAdjacentToDll(const wchar_t* exeName)
     {
-        wchar_t dllPath[MAX_PATH] = {};
-        if (GetModuleFileNameW(g_hModule, dllPath, MAX_PATH) == 0)
+        std::vector<wchar_t> dllBuffer(32768, L'\0');
+        DWORD len = GetModuleFileNameW(g_hModule, dllBuffer.data(), static_cast<DWORD>(dllBuffer.size() - 1));
+        if (len == 0 || len >= dllBuffer.size() - 1)
         {
             return exeName;
         }
-        PathRemoveFileSpecW(dllPath);
-        wchar_t fullExe[MAX_PATH] = {};
-        PathCombineW(fullExe, dllPath, exeName);
-        return fullExe;
+
+        std::wstring fullPath(dllBuffer.data(), len);
+        size_t lastSlash = fullPath.find_last_of(L"\\/");
+        if (lastSlash != std::wstring::npos)
+        {
+            return fullPath.substr(0, lastSlash + 1) + exeName;
+        }
+        return exeName;
     }
 }
 
@@ -214,22 +460,42 @@ IFACEMETHODIMP SubExplorerCommand::GetCanonicalName(GUID* pguidCommandName)
     return E_NOTIMPL;
 }
 
-IFACEMETHODIMP SubExplorerCommand::GetState(IShellItemArray*, BOOL, EXPCMDSTATE* pCmdState)
+IFACEMETHODIMP SubExplorerCommand::GetState(IShellItemArray* psiItemArray, BOOL, EXPCMDSTATE* pCmdState)
 {
+    if (!pCmdState) return E_POINTER;
+
+    if (psiItemArray && !m_entry.requiredCategory.empty())
+    {
+        std::wstring cat;
+        std::wstring singleExt;
+        if (!InspectSelectionCategory(psiItemArray, cat, singleExt) || cat != m_entry.requiredCategory)
+        {
+            *pCmdState = ECS_HIDDEN;
+            return S_OK;
+        }
+    }
+
     *pCmdState = ECS_ENABLED;
     return S_OK;
 }
 
 IFACEMETHODIMP SubExplorerCommand::GetFlags(EXPCMDFLAGS* pFlags)
 {
-    *pFlags = ECF_DEFAULT;
+    if (!pFlags) return E_POINTER;
+    *pFlags = m_entry.children.empty() ? ECF_DEFAULT : ECF_HASSUBCOMMANDS;
     return S_OK;
 }
 
 IFACEMETHODIMP SubExplorerCommand::EnumSubCommands(IEnumExplorerCommand** ppEnum)
 {
-    *ppEnum = nullptr;
-    return E_NOTIMPL;
+    if (!ppEnum) return E_POINTER;
+    if (m_entry.children.empty())
+    {
+        *ppEnum = nullptr;
+        return E_NOTIMPL;
+    }
+    *ppEnum = new EnumExplorerCommand(m_entry.children);
+    return S_OK;
 }
 
 IFACEMETHODIMP SubExplorerCommand::Invoke(IShellItemArray* psiItemArray, IBindCtx*)
@@ -263,39 +529,62 @@ IFACEMETHODIMP SubExplorerCommand::Invoke(IShellItemArray* psiItemArray, IBindCt
     std::wstring exePath = ResolveExecutableAdjacentToDll(
         m_entry.isOpenMoreDialog ? L"FileShift.App.exe" : L"fileshift.exe");
 
-    std::wstring cmdLine = QuoteWin32Arg(exePath);
+    std::wstring basePrefix = QuoteWin32Arg(exePath);
     if (!m_entry.isOpenMoreDialog)
     {
-        cmdLine += L" convert --to " + QuoteWin32Arg(m_entry.formatId) + L" --";
+        basePrefix += L" convert --to " + QuoteWin32Arg(m_entry.formatId) + L" --";
     }
 
-    for (const auto& path : selectedPaths)
+    // Chunk command lines safely below Win32 CreateProcessW 32,767 wchar_t limit
+    constexpr size_t MaxCmdLineChars = 24000;
+    size_t idx = 0;
+
+    while (idx < selectedPaths.size())
     {
-        cmdLine += L" " + QuoteWin32Arg(path);
-    }
+        std::wstring cmdLine = basePrefix;
+        size_t batchCount = 0;
 
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
+        while (idx < selectedPaths.size())
+        {
+            std::wstring quotedPath = L" " + QuoteWin32Arg(selectedPaths[idx]);
+            if (batchCount > 0 && (cmdLine.size() + quotedPath.size() > MaxCmdLineChars))
+            {
+                break;
+            }
+            cmdLine += quotedPath;
+            ++idx;
+            ++batchCount;
+        }
 
-    std::vector<wchar_t> mutableCmd(cmdLine.begin(), cmdLine.end());
-    mutableCmd.push_back(L'\0');
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
 
-    DWORD creationFlags = m_entry.isOpenMoreDialog ? 0 : CREATE_NO_WINDOW;
-    if (CreateProcessW(
-            exePath.c_str(),
-            mutableCmd.data(),
-            nullptr,
-            nullptr,
-            FALSE,
-            creationFlags,
-            nullptr,
-            nullptr,
-            &si,
-            &pi))
-    {
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
+        std::vector<wchar_t> mutableCmd(cmdLine.begin(), cmdLine.end());
+        mutableCmd.push_back(L'\0');
+
+        DWORD creationFlags = m_entry.isOpenMoreDialog ? 0 : CREATE_NO_WINDOW;
+        if (CreateProcessW(
+                exePath.c_str(),
+                mutableCmd.data(),
+                nullptr,
+                nullptr,
+                FALSE,
+                creationFlags,
+                nullptr,
+                nullptr,
+                &si,
+                &pi))
+        {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+        else
+        {
+            DWORD err = GetLastError();
+            AppendShellErrorLog(L"[FileShift.Shell] Error CreateProcessW (" + std::to_wstring(err) + L") ejecutando: " + exePath);
+            return HRESULT_FROM_WIN32(err);
+        }
     }
 
     return S_OK;
@@ -438,60 +727,33 @@ IFACEMETHODIMP RootExplorerCommand::GetToolTip(IShellItemArray*, LPWSTR* ppszInf
 
 IFACEMETHODIMP RootExplorerCommand::GetCanonicalName(GUID* pguidCommandName)
 {
+    if (!pguidCommandName) return E_POINTER;
     *pguidCommandName = CLSID_FileShiftExplorerCommand;
     return S_OK;
 }
 
 IFACEMETHODIMP RootExplorerCommand::GetState(IShellItemArray* psiItemArray, BOOL, EXPCMDSTATE* pCmdState)
 {
+    if (!pCmdState) return E_POINTER;
     *pCmdState = ECS_HIDDEN;
+
+    std::lock_guard<std::mutex> lock(m_mutex);
     m_cachedSubCommands.clear();
 
-    if (!psiItemArray) return S_OK;
-
-    DWORD count = 0;
-    if (FAILED(psiItemArray->GetCount(&count)) || count == 0)
+    MenuCacheConfig cfg = LoadMenuCacheConfig();
+    if (!cfg.enabled)
+    {
         return S_OK;
+    }
 
     std::wstring commonCategory;
     std::wstring singleExt;
-
-    for (DWORD i = 0; i < count; ++i)
+    if (!InspectSelectionCategory(psiItemArray, commonCategory, singleExt))
     {
-        IShellItem* psi = nullptr;
-        if (FAILED(psiItemArray->GetItemAt(i, &psi)) || !psi)
-            return S_OK;
-
-        PWSTR pszName = nullptr;
-        HRESULT hr = psi->GetDisplayName(SIGDN_FILESYSPATH, &pszName);
-        psi->Release();
-
-        if (FAILED(hr) || !pszName)
-            return S_OK;
-
-        LPCWSTR extPtr = PathFindExtensionW(pszName);
-        std::wstring ext = extPtr ? ToLower(extPtr) : L"";
-        CoTaskMemFree(pszName);
-
-        std::wstring category = ClassifyExtensionCategory(ext);
-        if (category.empty())
-            return S_OK;
-
-        if (i == 0)
-        {
-            commonCategory = category;
-            singleExt = ext;
-        }
-        else
-        {
-            if (category != commonCategory)
-                return S_OK;
-            if (ext != singleExt)
-                singleExt.clear();
-        }
+        return S_OK;
     }
 
-    m_cachedSubCommands = BuildSubMenuForCategory(commonCategory, singleExt);
+    m_cachedSubCommands = BuildSubMenuForCategory(commonCategory, singleExt, cfg);
     if (!m_cachedSubCommands.empty())
     {
         *pCmdState = ECS_ENABLED;
@@ -507,6 +769,7 @@ IFACEMETHODIMP RootExplorerCommand::Invoke(IShellItemArray*, IBindCtx*)
 
 IFACEMETHODIMP RootExplorerCommand::GetFlags(EXPCMDFLAGS* pFlags)
 {
+    if (!pFlags) return E_POINTER;
     *pFlags = ECF_HASSUBCOMMANDS;
     return S_OK;
 }
@@ -514,6 +777,22 @@ IFACEMETHODIMP RootExplorerCommand::GetFlags(EXPCMDFLAGS* pFlags)
 IFACEMETHODIMP RootExplorerCommand::EnumSubCommands(IEnumExplorerCommand** ppEnum)
 {
     if (!ppEnum) return E_POINTER;
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    if (m_cachedSubCommands.empty())
+    {
+        // Fallback if Explorer calls EnumSubCommands before GetState
+        MenuCacheConfig cfg = LoadMenuCacheConfig();
+        if (cfg.enabled)
+        {
+            for (const wchar_t* cat : { L"image", L"video", L"audio", L"pdf", L"document" })
+            {
+                auto catEntries = BuildSubMenuForCategory(cat, L"", cfg);
+                m_cachedSubCommands.insert(m_cachedSubCommands.end(), catEntries.begin(), catEntries.end());
+            }
+        }
+    }
+
     *ppEnum = new EnumExplorerCommand(m_cachedSubCommands);
     return S_OK;
 }

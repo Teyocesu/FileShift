@@ -361,6 +361,7 @@ export class ConversionQueueEngine {
 
   private async executeJob(job: ConversionJob): Promise<void> {
     let tempOutputPath: string | null = null;
+    let overwriteBackupPath: string | null = null;
 
     try {
       this.updateStatus(job, 'Preparing', 5);
@@ -373,6 +374,78 @@ export class ConversionQueueEngine {
       // Compute original SHA-256 before touching anything (INV-01)
       job.originalSha256 = computeFileSha256(job.inputPath);
       job.inputSizeBytes = fs.statSync(job.inputPath).size;
+
+      // Delegate to compiled .NET 10 C# CLI (src/Converter.Cli/bin/Release/net10.0/fileshift.dll) when present
+      const dotnetCliDll = path.resolve(process.cwd(), 'src/Converter.Cli/bin/Release/net10.0/fileshift.dll');
+      if (fs.existsSync(dotnetCliDll) && job.options.conflictPolicy !== 'Skip') {
+        this.updateStatus(job, 'Running', 30);
+        const cliArgs: string[] = [
+          dotnetCliDll,
+          'convert',
+          job.inputPath,
+          '--to',
+          job.targetFormat,
+          '--quality',
+          String(job.options.quality),
+          '--json',
+        ];
+        if (job.options.longestEdgePx && job.options.longestEdgePx > 0) {
+          cliArgs.push('--resize', String(job.options.longestEdgePx));
+        }
+        if (job.options.pageRange) {
+          cliArgs.push('--pages', job.options.pageRange);
+        }
+        if (job.options.stripMetadata) {
+          cliArgs.push('--strip-metadata');
+        }
+        if (job.options.customOutputDir) {
+          cliArgs.push('--out-dir', job.options.customOutputDir);
+        }
+        if (job.options.conflictPolicy === 'Overwrite') {
+          cliArgs.push('--overwrite');
+        } else {
+          cliArgs.push('--auto-rename');
+        }
+
+        const proc = await spawnSafeProcess('dotnet', cliArgs, {
+          timeoutMs: 45000,
+          onChild: (c) => this.activeProcesses.set(job.id, c),
+        });
+
+        if (this.cancelledIds.has(job.id)) {
+          throw new Error('Operación cancelada.');
+        }
+
+        const parsedList = JSON.parse(proc.stdout.trim() || '[]');
+        const csharpJob = parsedList[0];
+        if (!csharpJob || csharpJob.status !== 'Completed') {
+          throw new Error(csharpJob?.errorMessage || proc.stderr.trim() || 'Fallo en el motor C# FileShift.');
+        }
+
+        job.sourceFormat = csharpJob.sourceFormat || job.sourceFormat;
+        job.outputPath = csharpJob.outputPath;
+        job.outputFileName = csharpJob.outputPath ? path.basename(csharpJob.outputPath) : null;
+        job.outputSizeBytes = csharpJob.outputSizeBytes;
+        job.originalSha256 = csharpJob.originalSha256;
+        job.postOriginalSha256 = csharpJob.postOriginalSha256;
+        job.originalIntactVerified = Boolean(csharpJob.originalIntactVerified);
+        job.probeSummary = csharpJob.probeSummary;
+        job.engineUsed =
+          FORMAT_DESCRIPTORS[job.sourceFormat]?.category === 'pdf'
+            ? 'Ghostscript'
+            : FORMAT_DESCRIPTORS[job.sourceFormat]?.category === 'video' ||
+                FORMAT_DESCRIPTORS[job.sourceFormat]?.category === 'audio'
+              ? 'FFmpeg'
+              : 'ImageMagick';
+
+        if (!job.originalIntactVerified) {
+          throw new Error('Error crítico de invariante INV-01: el hash SHA-256 del archivo original cambió.');
+        }
+
+        job.completedAt = new Date().toISOString();
+        this.updateStatus(job, 'Completed', 100);
+        return;
+      }
 
       // Inspect binary magic signature
       const signature = inspectFileSignature(job.inputPath);
@@ -399,6 +472,9 @@ export class ConversionQueueEngine {
       if (finalOutputPath === null) {
         job.postOriginalSha256 = computeFileSha256(job.inputPath);
         job.originalIntactVerified = job.originalSha256 === job.postOriginalSha256;
+        if (!job.originalIntactVerified) {
+          throw new Error('Error crítico de invariante INV-01: el hash SHA-256 del archivo original cambió.');
+        }
         job.probeSummary = 'Omitido (el archivo de destino ya existía)';
         this.updateStatus(job, 'Completed', 100);
         job.completedAt = new Date().toISOString();
@@ -454,15 +530,31 @@ export class ConversionQueueEngine {
         throw new Error(`El archivo generado no superó la verificación binaria: ${outSignature.reason}`);
       }
 
-      // Atomic move from temporary file to final path
+      // Verify invariant INV-01 BEFORE publishing
+      const prePublishSha = computeFileSha256(job.inputPath);
+      if (prePublishSha !== job.originalSha256) {
+        throw new Error('Error crítico de invariante INV-01: el hash SHA-256 del archivo original cambió.');
+      }
+
+      // Protect pre-existing destination if Overwrite is enabled
+      if (job.options.conflictPolicy === 'Overwrite' && fs.existsSync(finalOutputPath)) {
+        overwriteBackupPath = `${finalOutputPath}.fileshift.bak.${job.id}`;
+        fs.copyFileSync(finalOutputPath, overwriteBackupPath);
+      }
+
+      // Atomic move from validated temporary file to final path
       fs.renameSync(tempOutputPath, finalOutputPath);
       tempOutputPath = null;
+      if (overwriteBackupPath && fs.existsSync(overwriteBackupPath)) {
+        try { fs.unlinkSync(overwriteBackupPath); } catch { /* ignore */ }
+        overwriteBackupPath = null;
+      }
 
       job.outputPath = finalOutputPath;
       job.outputFileName = path.basename(finalOutputPath);
       job.outputSizeBytes = fs.statSync(finalOutputPath).size;
 
-      // Verify invariant INV-01: original file is 100% untouched
+      // Verify invariant INV-01 after publish: original file is 100% untouched
       job.postOriginalSha256 = computeFileSha256(job.inputPath);
       job.originalIntactVerified = job.originalSha256 === job.postOriginalSha256;
 
@@ -479,6 +571,13 @@ export class ConversionQueueEngine {
       job.completedAt = new Date().toISOString();
       this.updateStatus(job, 'Completed', 100);
     } catch (err) {
+      if (overwriteBackupPath && fs.existsSync(overwriteBackupPath)) {
+        try {
+          fs.unlinkSync(overwriteBackupPath);
+        } catch {
+          // ignore
+        }
+      }
       if (tempOutputPath && fs.existsSync(tempOutputPath)) {
         try {
           fs.unlinkSync(tempOutputPath);

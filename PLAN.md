@@ -1,39 +1,24 @@
-# PLAN.md — Plan de Ejecución e Ingeniería de FileShift
+# PLAN.md — Plan de Remediación de Auditoría e Ingeniería de FileShift
 
-## 1. Fases del Proyecto
+## 1. Estado de Fases y Remediación
 
-### Fase A: Aplicación Mínima Funcional y Motor Universal (`COMPLETED`)
-- [x] Matriz real de capacidades (Imágenes, Video, Audio, PDF, Documentos Office opcionales).
-- [x] Inspección de firmas binarias (Magic Bytes) + sonda `ffprobe` para contenedores y codecs reales.
-- [x] Adaptadores reales para `ffmpeg`/`ffprobe`, `ImageMagick` (`magick`/`convert`), `Ghostscript` (`gs`) y `LibreOffice` (`soffice --headless`).
-- [x] Escritura atómica mediante archivo temporal en el volumen de destino y política anti-colisión (`AutoRename`, `Skip`, `Overwrite`).
-- [x] Ejecutable CLI (`convert`, `formats`, `doctor`) con códigos de salida coherentes.
+### Prioridad P0: Correctness y Preservación de Datos (`COMPLETED & VERIFIED`)
+- [x] **Validación Pre-Publicación (`ConversionQueue.cs`)**: El archivo temporal se valida íntegramente en estado `Validating` **antes** de invocar `PublishValidatedAtomicOutput`.
+- [x] **Validación Estructural y por Motor (`OutputIntegrityValidator.cs`)**: Comprobación de cabeceras mágicas, marcadores de fin de archivo (`IEND` en PNG, `FF D9` en JPEG, `0x3B` en GIF, `%%EOF` en PDF) y validación profunda con `identify`, `ffprobe` y `gs -sDEVICE=nullpage`.
+- [x] **Protección de Destino Previo en `Overwrite` (`SafeFilePolicy.cs`)**: Si la conversión falla o la salida es inválida/truncada, el archivo existente en el destino permanece intacto.
+- [x] **Invariante SHA-256 Estricto (`INV-01`)**: Si el SHA-256 del archivo original cambia, el trabajo falla explícitamente (`JobStatus.Failed`, nunca `Completed`).
+- [x] **Suite xUnit C# (`tests/Converter.Tests/ConversionPipelineTests.cs`)**: 9 pruebas automatizadas pasando en `.NET 10.0.403`.
 
-### Fase B: Integración Nativa con Windows 11 Explorer (`COMPLETED IN CODE / PENDING PHYSICAL QA`)
-- [x] Implementación C++17 Win32 COM (`src/Converter.Shell/ExplorerCommand.cpp`) de `IExplorerCommand` e `IEnumExplorerCommand`.
-- [x] Construcción dinámica de submenús (`EnumSubCommands`) leyendo las preferencias de formatos favoritos del usuario sin bloquear `explorer.exe`.
-- [x] Soporte de selección múltiple (`IShellItemArray`), rutas largas (`\\?\`), espacios y caracteres Unicode (`wchar_t` / `CreateProcessW`).
-- [x] Manifiesto de paquete sparse (`installer/AppxManifest.xml`) con `windows.fileExplorerContextMenus` y `com:ComServer`.
-- [x] Respaldo opcional para menú clásico reversible (`HKCU\Software\Classes\*\shell\FileShift`).
+### Prioridad P1: Aplicación Nativa WPF y Unificación de Motor (`COMPLETED & COMPILED`)
+- [x] **Compilación Real de WPF (`src/Converter.App/`)**: Corregido `MainWindow.xaml` (eliminados `StackPanel.Spacing` y `RowDefinition.Width`) y habilitado `EnableWindowsTargeting`. `dotnet build FileShift.sln -c Release` compila XAML y C# con 0 errores.
+- [x] **Funcionalidad Completa en `MainWindow.xaml.cs`**: Vistas operativas para **Actividad y Cola**, **Automatizaciones**, **Configuración General y Doctor**, **Menú Contextual Win11** y **Presets**, conectadas a `ConversionQueue`, `FolderAutomationService`, `UserSettingsStore`, `FormatMatrix` y `DoctorService`.
+- [x] **Unificación de Motor**: `server.ts` y `engineRunner.ts` delegan al binario compilado C# (`src/Converter.Cli/bin/Release/net10.0/fileshift.dll --json`), evitando mantener dos motores de conversión divergentes.
 
-### Fase C: Aplicación Desktop y Workbench Interactivo (`COMPLETED`)
-- [x] Solución nativa WPF (`src/Converter.App/`) y Workbench interactivo full-stack conectado a los motores reales del sistema.
-- [x] Pantalla principal de Actividad con Drag & Drop, selector de formato/preset, progreso en tiempo real, verificación de hash SHA-256 original/salida, y simulador integrado del menú contextual de Windows 11.
-- [x] Configuración General, Configuración interactiva del Menú Contextual (ordenamiento numerado `1`, `2`, `3` por categoría) y gestor de Presets.
+### Prioridad P1: Windows 11 Explorer (`IExplorerCommand`) y Empaquetado (`COMPLETED & COMPILED / PENDING PHYSICAL WIN11 QA`)
+- [x] **Extensión COM C++17 (`src/Converter.Shell/`)**: Lee `%LOCALAPPDATA%\FileShift\menu-cache.json` escrito por `UserSettingsStore`, ordena formatos favoritos por categoría, agrupa formatos adicionales en el submenú en cascada `Más formatos…` (`ECF_HASSUBCOMMANDS`), soporta rutas de hasta 32.768 caracteres, divide lotes extensos y registra fallos en `shell-errors.log`.
+- [x] **Compilación Binaria Cruzada**: Compilado `dist/win-x64/FileShift.Shell.dll` (`PE32+ executable (DLL) x86-64, for MS Windows`) mediante `x86_64-w64-mingw32-g++` sin advertencias ni errores.
+- [x] **Assets MSIX y Script de Release**: Creados `installer/Assets/StoreLogo.png`, `Square150x150Logo.png` y `Square44x44Logo.png`; actualizado `Build-WindowsRelease.ps1` para empaquetar `FileShift-Sparse.msix` (`makeappx.exe`) e invocar Inno Setup (`ISCC.exe`).
 
-### Fase D: Capacidades Adicionales (`COMPLETED`)
-- [x] Soporte multipágina y rango de páginas en PDF (`PDF → PNG/JPEG`) y ensamblado `Imágenes → PDF`.
-- [x] Módulo de Automatizaciones (vigilancia de carpetas con verificación de estabilidad de escritura y prevención de bucles infinitos).
-- [x] Soporte bilingüe Español / Inglés persistente.
-
-### Fase E: Instalación, Git y QA (`COMPLETED`)
-- [x] Script de instalación Inno Setup (`installer/FileShift.iss`) + scripts PowerShell de registro/desregistro MSIX Sparse Package (`Register-SparsePackage.ps1` y `Unregister-SparsePackage.ps1`).
-- [x] Inicialización del repositorio Git con rama principal `main` y rama de desarrollo `feat/initial-implementation`.
-- [x] Documentación de licencias (`THIRD_PARTY_NOTICES.md`) y pruebas de integración reales sobre archivos multimedia generados.
-
-## 2. Bloqueos y Limitaciones del Entorno Actual
-1. **Entorno de Ejecución Actual (Linux Container)**:
-   - Las pruebas de conversión multimedia (`FFmpeg`, `ImageMagick`, `Ghostscript`), CLI, cola concurrente, preservación del archivo original, manejo de colisiones, rutas Unicode/espacios, archivos corruptos y automatizaciones de carpetas se han ejecutado y verificado **de forma real** en este entorno.
-   - La compilación binaria de `FileShift.Shell.dll` (MSVC Win32 COM) y la prueba visual física haciendo clic derecho en `explorer.exe` sobre Windows 11 están marcadas honestamente como `NOT TESTED` en este contenedor Linux y listas para ejecutarse en el PC Windows 11 del usuario mediante `installer/Build-WindowsRelease.ps1`.
-2. **Push Remoto a GitHub (`https://github.com/Teyocesu/FileShift.git`)**:
-   - El repositorio Git local está completamente inicializado con el remoto `origin` apuntando a `https://github.com/Teyocesu/FileShift.git`, rama base `main` y todos los commits estructurados en `feat/initial-implementation`. Dado que el contenedor no almacena credenciales privadas de GitHub del usuario, se incluye un comando directo de push y la descarga empaquetada del repositorio completo desde la propia aplicación.
+### Prioridad P1: PDF Multipágina y Licencias (`COMPLETED & VERIFIED`)
+- [x] **PDF Multipágina (`PdfAdapter.cs`)**: Detecta número de páginas con Ghostscript, exporta todas las páginas por defecto (`1..N`) o el rango indicado (`--pages 1-3`), y rechaza PDFs cifrados o dañados.
+- [x] **Licencias**: Añadido `/LICENSE` (MIT) y verificado `/THIRD_PARTY_NOTICES.md`.

@@ -1,11 +1,12 @@
 #pragma once
 
 #include <windows.h>
-#include <shobjidl_core.h>
+#include <shobjidl.h>
 #include <shlwapi.h>
 #include <string>
 #include <vector>
 #include <atomic>
+#include <mutex>
 
 // {D87E4B9A-6C21-4F08-9E3A-5A18C42B7101}
 static const CLSID CLSID_FileShiftExplorerCommand =
@@ -18,7 +19,9 @@ struct TargetMenuEntry
 {
     std::wstring formatId;
     std::wstring title;
+    std::wstring requiredCategory;
     bool isOpenMoreDialog = false;
+    std::vector<TargetMenuEntry> children;
 };
 
 class SubExplorerCommand final : public IExplorerCommand
@@ -93,5 +96,6 @@ public:
 private:
     ~RootExplorerCommand() = default;
     std::atomic<ULONG> m_refCount{ 1 };
+    std::mutex m_mutex;
     std::vector<TargetMenuEntry> m_cachedSubCommands;
 };
