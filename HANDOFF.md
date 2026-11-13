@@ -1,35 +1,26 @@
-# HANDOFF.md — Estado Actual, Evidencia y Próxima Acción
+# FileShift · Estado de la primera release
 
-## 1. Estado Actual
-**FileShift v1.0.0** se encuentra implementado de extremo a extremo:
-- **Código Nativo Windows 11 (`src/Converter.*` + `installer/`)**:
-  - `src/Converter.Core/`: Modelos de dominio, detector de formatos por firmas mágicas (`MagicByteInspector.cs`), matriz de capacidades (`FormatMatrix.cs`), cola concurrente (`ConversionQueue.cs`), política segura de archivos (`SafeFilePolicy.cs`) y motor de automatizaciones (`FolderAutomationService.cs`).
-  - `src/Converter.Infrastructure/`: Adaptadores reales con `ProcessStartInfo.ArgumentList` para `FFmpegAdapter.cs` (con paleta de 2 pasos para GIF y progreso por duración), `ImageMagickAdapter.cs` (con auto-orientación EXIF, fondo explícito para destinos sin alfa y preservación de frames animados), `PdfAdapter.cs` y `LibreOfficeAdapter.cs`.
-  - `src/Converter.Cli/`: CLI completa (`Program.cs`) con subcomandos `convert`, `formats` y `doctor`.
-  - `src/Converter.Shell/`: Extensión nativa C++17 Win32 COM (`ExplorerCommand.h`, `ExplorerCommand.cpp`, `dllmain.cpp`, `FileShift.Shell.def`, `CMakeLists.txt`) que implementa `IExplorerCommand` e `IEnumExplorerCommand` para el menú contextual moderno de Windows 11.
-  - `src/Converter.App/`: Aplicación de escritorio WPF (.NET 10) con tema oscuro de precisión, Drag & Drop, bandeja del sistema, pestañas de Actividad, Automatizaciones y Ajustes (General, Menú, Presets).
-  - `installer/`: `AppxManifest.xml` (Sparse Package con `windows.fileExplorerContextMenus`), `FileShift.iss` (Inno Setup), `Build-WindowsRelease.ps1`, `Register-SparsePackage.ps1` y `Unregister-SparsePackage.ps1`.
-- **Motor y Aplicación Ejecutable en Tiempo Real (Linux / Multiplataforma)**:
-  - Ejecuta conversiones reales en disco usando `/usr/bin/ffmpeg`, `/usr/bin/ffprobe`, `/usr/bin/convert` (ImageMagick) y `/usr/bin/gs` (Ghostscript).
-  - Incluye CLI ejecutable (`npx tsx cli/fileshift-cli.ts`) y suite de pruebas automatizadas (`npx --yes tsx --test src/core/converter.test.ts`).
+Rama `feat/initial-implementation`. Base `f73850a` e implementación recibida `75a4cbf`. Las dos ramas ya existían en GitHub al iniciar el trabajo. Consultar SPEC para el contrato y PLAN para los criterios de cierre.
 
-## 2. Evidencia de Verificación Automática
-1. **Pruebas de Integración Reales (`src/core/converter.test.ts`)**:
-   - Conversión real de imagen `PNG → WebP` y `PNG → JPEG` verificando cabeceras binarias (`RIFF....WEBP` y `FF D8 FF`).
-   - Conversión real de video `MP4 → WebM` y `MP4 → GIF` verificando contenedores y flujos con `ffprobe`.
-   - Extracción real de audio `MP4 → MP3` y conversión `WAV → FLAC` verificando cabeceras y duración.
-   - Conversión real de `PDF → PNG` e `Imagen → PDF` verificando firma `%PDF-`.
-   - Verificación criptográfica SHA-256 de que el archivo original permanece 100% idéntico antes y después de cada conversión.
-   - Política de colisión `AutoRename`: genera `archivo (1).ext` sin sobrescribir el archivo existente.
-   - Manejo de rutas con espacios y caracteres Unicode (`¡Prueba España 日本語 2026!.png`).
-   - Rechazo seguro de archivos corruptos/truncados sin dejar archivos temporales ni salidas vacías (`0 bytes`).
-   - Prevención de bucles en reglas de automatización de carpetas.
+## Evidencia nueva
 
-## 3. Próxima Acción en Windows 11 Físico
-1. Clonar o descomprimir el repositorio en Windows 11 con .NET SDK y Visual Studio 2022 Build Tools (C++ Desktop workload):
-   ```powershell
-   git checkout feat/initial-implementation
-   .\installer\Build-WindowsRelease.ps1
-   ```
-2. Ejecutar `.\installer\Register-SparsePackage.ps1` para registrar el certificado de desarrollo temporal y el paquete sparse MSIX (`FileShift.SparsePackage`), habilitando de inmediato la entrada **Convertir con FileShift** en el menú contextual primario de Windows 11 Explorer.
-3. Realizar la lista de comprobación física de Explorer detallada en `SPEC.md` y fusionar la Pull Request `feat/initial-implementation` hacia `main`.
+- En `75a4cbf`, la prueba de regresión multipágina falló porque la cola eliminó el destino previo de la segunda página.
+- Con staging de todas las salidas, la prueba de regresión y las 14 pruebas de conversión pasaron en macOS con .NET 10.0.302, Ghostscript, ImageMagick y FFmpeg. La solución .NET compiló con cero advertencias y errores.
+- Windows Actions compiló WPF y COM x64 y ejecutó las 14 pruebas con motores Windows. Consultá el último run de la PR para los artefactos.
+- Explorer, instalación y desinstalación físicas siguen pendientes.
+
+## QA físico en Windows 11 x64
+
+Ejecutá estos pasos en una cuenta de pruebas, con copias descartables. Usá el candidato de CI correspondiente a la PR y guardá su SHA.
+
+1. Extraé el artefacto `FileShift-Development-win-x64` de Actions. Compará `Get-FileHash` de los archivos con `SHA256SUMS.txt`. Ejecutá `Install-WindowsDependencies.ps1` desde PowerShell. Aceptá la elevación de los instaladores de motores si Windows la solicita.
+2. Importá únicamente el certificado público del candidato en el almacén de pruebas con `Import-Certificate -FilePath .\FileShift-Development.cer -CertStoreLocation Cert:\CurrentUser\TrustedPeople`. Guardá el thumbprint que devuelve. Ejecutá `FileShift-Setup-Development-win-x64.exe` y comprobá `Get-AppxPackage FileShift.UniversalConverter`.
+3. Creá una carpeta de QA con copias de un PNG, un MP4 con audio y un PDF de dos páginas. Guardá hashes con `Get-ChildItem -File | Get-FileHash | Export-Csv ..\fileshift-originales.csv -NoTypeInformation`.
+4. Cerrá FileShift desde **Salir** en la bandeja. En Explorer, hacé clic derecho sobre el PNG y usá **Convertir a… → WebP** en el menú moderno. Abrí el WebP. Repetí con **Extraer audio MP3** sobre el MP4 y reproducí el audio. Verificá que la aplicación principal siga cerrada.
+5. Seleccioná dos PNG con nombres distintos, uno con espacios y acentos, y convertilos juntos. Probá una selección con PNG y MP4. Abrí esa selección en FileShift y verificá que pida un destino válido para el lote. Probá PDF más PNG con un destino común, por ejemplo JPEG. Verificá ambos resultados.
+6. Repetí PNG → WebP con AutoRename. Debe aparecer ` (1).webp` y el primer WebP debe conservar su hash. En una prueba aparte, creá una carpeta que se llame igual que la salida de página 2 de un PDF y probá Overwrite. Verificá que el destino previo de página 1 siga intacto.
+7. Creá un `corrupto.png` descartable con `Set-Content .\corrupto.png 'archivo inválido'`. Convertí desde Explorer y comprobá que aparezca el error. En WPF, convertí un video suficientemente largo y cancelalo desde Actividad. Esperá el estado cancelado y comprobá que la conversión se detuvo y la carpeta de staging desapareció.
+8. Verificá los hashes de originales con `Import-Csv ..\fileshift-originales.csv | ForEach-Object { if ((Get-FileHash -LiteralPath $_.Path).Hash -ne $_.Hash) { throw "Original alterado: $($_.Path)" } }`.
+9. En **Menú Contextual Win11**, reordená los favoritos de PDF e imagen y guardá. Verificá el orden desde Explorer. Reiniciá **Explorador de Windows** desde el Administrador de tareas y repetí PNG → WebP.
+10. Creá una regla PNG → WebP en una carpeta de QA. Cerrá la ventana con **Mantener en bandeja** habilitado, copiá un PNG y verificá que aparece exactamente un WebP. Volvé desde la bandeja y comprobá la actividad.
+11. Salí de FileShift y desinstalalo desde **Configuración → Aplicaciones instaladas**. Verificá que `Get-AppxPackage FileShift.UniversalConverter` no devuelva paquetes y que el comando desaparezca al reiniciar Explorer. Quitá del almacén `Cert:\CurrentUser\TrustedPeople` el certificado cuyo thumbprint anotaste. Los motores y las preferencias quedan disponibles para futuras instalaciones.

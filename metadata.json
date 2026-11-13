@@ -1,0 +1,6 @@
+{
+  "name": "FileShift — Universal Windows 11 File Converter",
+  "description": "Convertidor universal de archivos local-first, gratuito y open source para Windows 11 con integración nativa en el menú contextual moderno (IExplorerCommand), cola concurrente, presets, automatizaciones de carpetas y motores reales FFmpeg, ImageMagick y Ghostscript.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

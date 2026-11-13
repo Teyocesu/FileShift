@@ -16,6 +16,8 @@ x64/
 
 # Temporary conversion & runtime workspace files
 .playwright-cli/
+.aistudio/
+public/assets/aistudio/
 .fileshift.tmp.*
 *.tmp
 workspace-runtime/
