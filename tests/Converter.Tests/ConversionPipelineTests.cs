@@ -97,13 +97,22 @@ public sealed class ConversionPipelineTests
 
     private sealed class SlowCancelableAdapter : IConversionEngineAdapter
     {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource CancellationSeen { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource CleanupAllowed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public string EngineName => "ImageMagick";
         public Task<bool> IsAvailableAsync(CancellationToken ct = default) => Task.FromResult(true);
 
         public async Task ConvertAsync(ConversionJob job, string tempOutputPath, IProgress<double>? progress, CancellationToken ct = default)
         {
             await File.WriteAllBytesAsync(tempOutputPath, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A], ct);
-            await Task.Delay(TimeSpan.FromSeconds(10), ct);
+            Started.TrySetResult();
+            try { await Task.Delay(Timeout.InfiniteTimeSpan, ct); }
+            finally
+            {
+                CancellationSeen.TrySetResult();
+                await CleanupAllowed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            }
         }
     }
 
@@ -135,7 +144,7 @@ public sealed class ConversionPipelineTests
             Assert.True(File.Exists(existingWebp), "El archivo de destino previo no debe ser eliminado si la nueva salida es inválida.");
             Assert.Equal(existingWebpSha, await SafeFilePolicy.ComputeSha256Async(existingWebp));
             Assert.Equal(originalPngSha, await SafeFilePolicy.ComputeSha256Async(sourcePng));
-            Assert.Empty(Directory.GetFiles(tempDir, ".fileshift.tmp.*"));
+            Assert.Empty(Directory.GetFileSystemEntries(tempDir, ".fileshift.tmp.*"));
         }
         finally
         {
@@ -264,17 +273,29 @@ public sealed class ConversionPipelineTests
             await CreateSamplePngAsync(sourcePng);
             var preSha = await SafeFilePolicy.ComputeSha256Async(sourcePng);
 
-            using var queue = new ConversionQueue([new SlowCancelableAdapter()], maxConcurrency: 1);
+            var adapter = new SlowCancelableAdapter();
+            using var queue = new ConversionQueue([adapter], maxConcurrency: 1);
             var job = queue.Enqueue(sourcePng, "webp");
 
-            await Task.Delay(150);
-            queue.CancelJob(job.Id);
+            await adapter.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            var completion = queue.WaitForJobAsync(job.Id);
+            try
+            {
+                Assert.True(queue.CancelJob(job.Id));
+                await adapter.CancellationSeen.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                Assert.False(completion.IsCompleted);
+                Assert.NotEqual(JobStatus.Cancelled, job.Status);
+            }
+            finally
+            {
+                adapter.CleanupAllowed.TrySetResult();
+            }
 
-            var finished = await queue.WaitForJobAsync(job.Id);
+            var finished = await completion.WaitAsync(TimeSpan.FromSeconds(10));
             Assert.Equal(JobStatus.Cancelled, finished.Status);
             Assert.Null(finished.OutputPath);
             Assert.Equal(preSha, await SafeFilePolicy.ComputeSha256Async(sourcePng));
-            Assert.Empty(Directory.GetFiles(tempDir, ".fileshift.tmp.*"));
+            Assert.Empty(Directory.GetFileSystemEntries(tempDir, ".fileshift.tmp.*"));
         }
         finally
         {

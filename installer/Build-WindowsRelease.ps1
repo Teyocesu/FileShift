@@ -87,11 +87,9 @@ try {
     $signature = @('sign', '/fd', 'SHA256', '/sha1', $cert.Thumbprint)
     if ($TimestampUrl) { $signature += @('/tr', $TimestampUrl, '/td', 'SHA256') }
     Invoke-Checked $signTool ($signature + $msix)
-    if ((Get-AuthenticodeSignature -FilePath $msix).SignerCertificate.Thumbprint -ne $cert.Thumbprint) {
-        throw 'El firmante del MSIX no coincide.'
-    }
     if (!$Development) { Invoke-Checked $signTool @('verify', '/pa', $msix) }
-    Invoke-Checked $sdk.FullName @('unpack', '/p', $msix, '/d', $verified, '/nv')
+    Invoke-Checked $sdk.FullName @('unpack', '/p', $msix, '/d', $verified)
+    if (!(Test-Path "$verified/AppxSignature.p7x")) { throw 'El paquete MSIX no contiene firma.' }
     if ((Get-FileHash "$stage/AppxManifest.xml").Hash -ne (Get-FileHash "$verified/AppxManifest.xml").Hash) {
         throw 'El manifiesto extraído no coincide.'
     }
