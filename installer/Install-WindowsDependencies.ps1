@@ -42,7 +42,8 @@ try {
     } else {
         $magickSetup = Get-VerifiedDownload 'https://github.com/ImageMagick/ImageMagick/releases/download/7.1.2-35/ImageMagick-7.1.2-35-Q16-HDRI-x64-dll.exe' '32cc21fe23f7d7b7d9133905a2dc5aac94f574a07740911d948eb88b09a0b432'
         Install-Program $magickSetup ('/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="{0}"' -f $magick)
-        Install-Program $gsSetup "/S /D=$gs"
+        Write-Host "Completá el asistente de Ghostscript usando la carpeta $gs"
+        Install-Program $gsSetup "/D=$gs"
     }
 
     foreach ($binary in @("$ffmpeg/ffmpeg.exe", "$ffmpeg/ffprobe.exe", "$magick/magick.exe", "$gs/bin/gswin64c.exe")) {

@@ -10,6 +10,7 @@ if (!$Development -and (!$CertThumbprint -or !$TimestampUrl)) {
 }
 
 function Invoke-Checked([string]$Command, [string[]]$Arguments) {
+    Write-Host "Ejecutando $Command $($Arguments[0])"
     & $Command @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Command terminó con código $LASTEXITCODE" }
 }
@@ -33,7 +34,7 @@ foreach ($path in @($output, $installer, $stage, $verified)) {
 New-Item -ItemType Directory -Path $output, $installer, $stage | Out-Null
 Invoke-Checked dotnet @('restore', "$root/FileShift.sln")
 Invoke-Checked dotnet @('build', "$root/FileShift.sln", '-c', 'Release', '--no-restore')
-Invoke-Checked dotnet @('test', "$root/tests/Converter.Tests", '-c', 'Release', '--no-build', '--logger', 'trx', '--results-directory', "$root/dist/test-results")
+Invoke-Checked dotnet @('test', "$root/tests/Converter.Tests", '-c', 'Release', '--no-build', '--blame-hang-timeout', '60s', '--logger', 'trx', '--results-directory', "$root/dist/test-results")
 foreach ($project in @('Converter.Cli', 'Converter.App')) {
     Invoke-Checked dotnet @('publish', "$root/src/$project/$project.csproj", '-c', 'Release',
         '-r', 'win-x64', '--self-contained', 'true', '-o', $output)
@@ -89,7 +90,10 @@ try {
     Invoke-Checked $signTool ($signature + $msix)
     if (!$Development) { Invoke-Checked $signTool @('verify', '/pa', $msix) }
     Invoke-Checked $sdk.FullName @('unpack', '/p', $msix, '/d', $verified)
-    if (!(Test-Path "$verified/AppxSignature.p7x")) { throw 'El paquete MSIX no contiene firma.' }
+    $archive = [IO.Compression.ZipFile]::OpenRead($msix)
+    try {
+        if (!$archive.GetEntry('AppxSignature.p7x')) { throw 'El paquete MSIX no contiene firma.' }
+    } finally { $archive.Dispose() }
     if ((Get-FileHash "$stage/AppxManifest.xml").Hash -ne (Get-FileHash "$verified/AppxManifest.xml").Hash) {
         throw 'El manifiesto extraído no coincide.'
     }

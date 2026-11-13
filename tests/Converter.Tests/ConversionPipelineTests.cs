@@ -495,6 +495,38 @@ public sealed class ConversionPipelineTests
     }
 
     [Fact]
+    public void Overwrite_WhenRollbackCannotRestore_KeepsOriginalDestinationBackup()
+    {
+        var directory = Directory.CreateTempSubdirectory("fileshift-recovery-");
+        try
+        {
+            var stage = directory.CreateSubdirectory("stage");
+            var destination = Path.Combine(directory.FullName, "output.png");
+            var staged = Path.Combine(stage.FullName, "output.png");
+            File.WriteAllText(destination, "preexisting content");
+            File.WriteAllText(staged, "new content");
+            var input = Path.Combine(directory.FullName, "input.pdf");
+
+            var error = Assert.Throws<IOException>(() => SafeFilePolicy.PublishOutputs(
+                [staged], directory.FullName, input, ConflictPolicy.Overwrite, () =>
+                {
+                    File.Delete(destination);
+                    Directory.CreateDirectory(destination);
+                    throw new InvalidDataException("Fallo al verificar el original");
+                }, CancellationToken.None));
+
+            var backup = Assert.Single(directory.GetFiles(".fileshift.bak.*"));
+            Assert.Contains(backup.FullName, error.Message);
+            Assert.Equal("preexisting content", File.ReadAllText(backup.FullName));
+            Assert.True(Directory.Exists(destination));
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public void UserSettingsStore_PersistsSettings_AndGeneratesMenuCacheForExplorerShell()
     {
         var tempConfigDir = Path.Combine(Path.GetTempPath(), $"fileshift_cfg_{Guid.NewGuid():N}");
