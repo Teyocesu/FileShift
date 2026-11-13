@@ -70,11 +70,12 @@ public static class Program
     {
         bool json = args.Any(a => a.Equals("--json", StringComparison.OrdinalIgnoreCase));
         var diagnostics = await DoctorService.RunDiagnosticsAsync();
+        DoctorService.UpdateShellConversionMatrix(diagnostics);
 
         if (json)
         {
             Console.WriteLine(JsonSerializer.Serialize(diagnostics, JsonOpts));
-            return diagnostics.Any(d => d.Name == "FFmpeg" && d.Available) ? 0 : 2;
+            return diagnostics.Where(d => !d.Name.Contains("Opcional", StringComparison.Ordinal)).All(d => d.Available) ? 0 : 2;
         }
 
         Console.WriteLine("FileShift Doctor — Diagnóstico de Motores, Codecs e Integración Shell");
@@ -86,7 +87,7 @@ public static class Program
         }
         Console.WriteLine(new string('─', 76));
         Console.WriteLine($"Plataforma: {Environment.OSVersion} | Concurrencia recomendada: {Math.Clamp(Environment.ProcessorCount / 2, 2, 8)} hilos");
-        return diagnostics.Any(d => d.Name == "FFmpeg" && d.Available) ? 0 : 2;
+        return diagnostics.Where(d => !d.Name.Contains("Opcional", StringComparison.Ordinal)).All(d => d.Available) ? 0 : 2;
     }
 
     private static async Task<int> RunConvertCommandAsync(string[] args)
@@ -95,12 +96,14 @@ public static class Program
         var inputFiles = new List<string>();
         string? targetFormat = null;
         string? presetName = null;
-        int quality = 85;
+        int? quality = null;
+        int? bitrate = null;
         int? longestEdge = null;
-        string? outputDir = null;
+        string? outputDir = settings.SaveNextToOriginal ? null : settings.CustomOutputDirectory;
         string? pageRange = null;
         bool stripMetadata = false;
         bool jsonOutput = false;
+        bool fromExplorer = false;
         ConflictPolicy conflictPolicy = settings.DefaultConflictPolicy;
 
         for (int i = 0; i < args.Length; i++)
@@ -131,8 +134,14 @@ public static class Program
                 case "--overwrite":
                     conflictPolicy = ConflictPolicy.Overwrite;
                     break;
+                case "--skip":
+                    conflictPolicy = ConflictPolicy.Skip;
+                    break;
                 case "--auto-rename":
                     conflictPolicy = ConflictPolicy.AutoRename;
+                    break;
+                case "--explorer":
+                    fromExplorer = true;
                     break;
                 case "--json":
                     jsonOutput = true;
@@ -142,8 +151,8 @@ public static class Program
                     i = args.Length;
                     break;
                 default:
-                    if (!args[i].StartsWith('-'))
-                        inputFiles.Add(args[i]);
+                    if (args[i].StartsWith('-')) return FailWithMessage($"Opción inválida: {args[i]}");
+                    inputFiles.Add(args[i]);
                     break;
             }
         }
@@ -152,15 +161,15 @@ public static class Program
         {
             var preset = settings.Presets.FirstOrDefault(p =>
                 p.Id.Equals(presetName, StringComparison.OrdinalIgnoreCase) ||
-                p.Name.Contains(presetName, StringComparison.OrdinalIgnoreCase));
+                p.Name.Equals(presetName, StringComparison.OrdinalIgnoreCase) ||
+                p.Id.Equals($"preset-{presetName}", StringComparison.OrdinalIgnoreCase));
 
-            if (preset is not null)
-            {
-                targetFormat ??= preset.TargetFormat;
-                quality = preset.Quality;
-                longestEdge ??= preset.LongestEdgePx;
-                stripMetadata |= preset.StripMetadata;
-            }
+            if (preset is null) return FailWithMessage($"Preset desconocido: {presetName}");
+            targetFormat ??= preset.TargetFormat;
+            quality ??= preset.Quality;
+            longestEdge ??= preset.LongestEdgePx;
+            bitrate = preset.AudioBitrateKbps;
+            stripMetadata |= preset.StripMetadata;
         }
 
         if (inputFiles.Count == 0 || string.IsNullOrWhiteSpace(targetFormat))
@@ -180,7 +189,8 @@ public static class Program
             new OutputIntegrityValidator());
 
         var options = new ConversionOptions(
-            Quality: quality,
+            Quality: quality ?? settings.DefaultQuality,
+            AudioBitrateKbps: bitrate,
             LongestEdgePx: longestEdge,
             StripMetadata: stripMetadata,
             ConflictPolicy: conflictPolicy,
@@ -239,8 +249,17 @@ public static class Program
             Console.WriteLine(JsonSerializer.Serialize(payload, JsonOpts));
         }
 
+        if (fromExplorer && failures > 0 && OperatingSystem.IsWindows())
+        {
+            var errors = finishedJobs.Where(job => job.Status != JobStatus.Completed).Take(5)
+                .Select(job => $"{job.FileName}: {job.ErrorMessage}");
+            MessageBoxW(IntPtr.Zero, string.Join(Environment.NewLine, errors), "FileShift", 0x00000010);
+        }
         return failures == 0 ? 0 : 1;
     }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, ExactSpelling = true)]
+    private static extern int MessageBoxW(IntPtr owner, string text, string caption, uint type);
 
     private static int FailWithMessage(string msg)
     {

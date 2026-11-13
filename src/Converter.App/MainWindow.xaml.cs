@@ -16,8 +16,12 @@ public partial class MainWindow : Window
     private readonly ConversionQueue _queue;
     private readonly FolderAutomationService _automationService;
     private readonly bool _libreOfficeInstalled;
+    private readonly System.Windows.Forms.NotifyIcon _tray;
+    private IReadOnlyList<string> _selectedFiles = [];
+    private bool _exitRequested;
+    private bool _shutdownComplete;
 
-    public MainWindow()
+    public MainWindow(IReadOnlyList<string> startupFiles)
     {
         InitializeComponent();
 
@@ -35,41 +39,43 @@ public partial class MainWindow : Window
             _settings.MaxConcurrency,
             new OutputIntegrityValidator());
 
-        _automationService = new FolderAutomationService(_queue);
+        _automationService = new FolderAutomationService(_queue, () => _settings.Presets.ToArray());
         _automationService.SyncRules(_settings.Automations);
 
         _queue.JobUpdated += OnJobUpdated;
 
-        InitializeTargetFormatPickers(null);
+        _tray = new System.Windows.Forms.NotifyIcon
+        {
+            Icon = System.Drawing.SystemIcons.Application,
+            Text = "FileShift",
+            ContextMenuStrip = new System.Windows.Forms.ContextMenuStrip()
+        };
+        _tray.ContextMenuStrip.Items.Add("Abrir FileShift", null, (_, _) => RestoreWindow());
+        _tray.ContextMenuStrip.Items.Add("Salir", null, (_, _) => { _exitRequested = true; Close(); });
+        _tray.DoubleClick += (_, _) => RestoreWindow();
+
+        TxtQuality.Text = _settings.DefaultQuality.ToString(CultureInfo.InvariantCulture);
+        InitializeTargetFormatPickers();
         PopulatePresetsUi();
         PopulateAutomationsUi();
         PopulateGeneralSettingsUi();
         PopulateMenuSettingsUi();
         RefreshJobList();
         _ = RunDoctorDiagnosticsAsync();
+        if (startupFiles.Count > 0) SelectFiles(startupFiles);
     }
 
-    private void InitializeTargetFormatPickers(string? sourceFormatOrPath)
+    private void InitializeTargetFormatPickers()
     {
-        IReadOnlyList<string> compatibleTargets;
-        if (!string.IsNullOrWhiteSpace(sourceFormatOrPath))
-        {
-            compatibleTargets = FormatMatrix.GetSupportedTargets(sourceFormatOrPath, _libreOfficeInstalled);
-            if (compatibleTargets.Count > 0)
-            {
-                TxtCompatibilityHint.Text = $"Formatos compatibles ({Path.GetExtension(sourceFormatOrPath).ToLowerInvariant()}): {string.Join(", ", compatibleTargets)}";
-            }
-            else
-            {
-                compatibleTargets = GetAllCanonicalFormats();
-                TxtCompatibilityHint.Text = "Formatos compatibles: Todos";
-            }
-        }
-        else
-        {
-            compatibleTargets = GetAllCanonicalFormats();
-            TxtCompatibilityHint.Text = "Formatos compatibles: Todos";
-        }
+        IReadOnlyList<string> compatibleTargets = _selectedFiles.Count == 0
+            ? GetAllCanonicalFormats()
+            : _selectedFiles.Select(file => FormatMatrix.GetSupportedTargets(Path.GetExtension(file), _libreOfficeInstalled))
+                .Aggregate((left, right) => left.Intersect(right).ToArray());
+
+        TxtCompatibilityHint.Text = _selectedFiles.Count == 0 ? "Seleccioná archivos para convertir."
+            : compatibleTargets.Count == 0 ? "Los archivos seleccionados no tienen un destino compatible en común."
+            : $"{_selectedFiles.Count} archivo(s). Destinos en común: {string.Join(", ", compatibleTargets)}";
+        BtnConvertSelection.IsEnabled = _selectedFiles.Count > 0 && compatibleTargets.Count > 0;
 
         var previous = CmbTargetFormat.SelectedItem as string;
         CmbTargetFormat.Items.Clear();
@@ -82,9 +88,9 @@ public partial class MainWindow : Window
         {
             CmbTargetFormat.SelectedItem = previous;
         }
-        else if (CmbTargetFormat.Items.Count > 0)
+        else if (_selectedFiles.Count == 0)
         {
-            CmbTargetFormat.SelectedIndex = 0;
+            CmbTargetFormat.SelectedItem = "webp";
         }
 
         if (CmbRuleTargetFormat.Items.Count == 0)
@@ -115,6 +121,12 @@ public partial class MainWindow : Window
         Dispatcher.InvokeAsync(() =>
         {
             RefreshJobList();
+            if (job.Status is JobStatus.Completed or JobStatus.Failed && _settings.ShowNotifications && !IsVisible)
+            {
+                _tray.ShowBalloonTip(3000, "FileShift",
+                    job.Status == JobStatus.Completed ? $"Procesado: {job.FileName}" : job.ErrorMessage ?? job.FileName,
+                    System.Windows.Forms.ToolTipIcon.Info);
+            }
             if (job.Status == JobStatus.Completed)
             {
                 TxtStatusBar.Text = $"Completado: {Path.GetFileName(job.InputPath)} -> {Path.GetFileName(job.OutputPath)} (SHA-256 original verificado)";
@@ -192,46 +204,46 @@ public partial class MainWindow : Window
             : null;
 
         string? pageRange = string.IsNullOrWhiteSpace(TxtPageRange.Text) ? null : TxtPageRange.Text.Trim();
-        string? presetName = (CmbPreset.SelectedItem as ConversionPreset)?.Name;
+        var preset = CmbPreset.SelectedItem as ConversionPreset;
+        if (preset?.TargetFormat != CmbTargetFormat.SelectedItem as string)
+            preset = null;
         string? customOut = string.IsNullOrWhiteSpace(_settings.CustomOutputDirectory) ? null : _settings.CustomOutputDirectory;
 
         return new ConversionOptions(
             Quality: quality,
             LongestEdgePx: longestEdge,
+            AudioBitrateKbps: preset?.AudioBitrateKbps,
             StripMetadata: ChkStripMetadata.IsChecked == true,
             ConflictPolicy: _settings.DefaultConflictPolicy,
             CustomOutputDirectory: customOut,
             PageRange: pageRange,
-            PresetName: presetName,
+            PresetName: preset?.Name,
             TriggeredBy: "WPF"
         );
     }
 
-    private string GetSelectedTargetFormat()
+    private void SelectFiles(IReadOnlyList<string> files)
     {
-        return CmbTargetFormat.SelectedItem as string ?? "webp";
+        _selectedFiles = files;
+        InitializeTargetFormatPickers();
+        if (CmbPreset.SelectedItem is ConversionPreset preset &&
+            !CmbTargetFormat.Items.Contains(preset.TargetFormat))
+            CmbPreset.SelectedIndex = 0;
     }
 
-    private void EnqueueFilesForConversion(IReadOnlyList<string> files)
+    private void BtnConvertSelection_Click(object sender, RoutedEventArgs e)
     {
-        if (files.Count == 0) return;
-
-        InitializeTargetFormatPickers(files[0]);
-
-        var target = GetSelectedTargetFormat();
-        var options = BuildCurrentOptions();
-
-        foreach (var file in files)
+        if (CmbTargetFormat.SelectedItem is not string target)
         {
-            var supported = FormatMatrix.GetSupportedTargets(file, _libreOfficeInstalled);
-            var effectiveTarget = supported.Contains(target, StringComparer.OrdinalIgnoreCase)
-                ? target
-                : (supported.FirstOrDefault() ?? target);
-
-            _queue.Enqueue(file, effectiveTarget, options);
+            TxtStatusBar.Text = "Elegí un formato de destino compatible.";
+            return;
         }
 
-        TxtStatusBar.Text = $"Encolados {files.Count} archivo(s) hacia .{target.ToUpperInvariant()}";
+        var options = BuildCurrentOptions();
+        foreach (var file in _selectedFiles)
+            _queue.Enqueue(file, target, options);
+
+        TxtStatusBar.Text = $"Encolados {_selectedFiles.Count} archivo(s) hacia .{target.ToUpperInvariant()}";
     }
 
     private void BtnAddFiles_Click(object sender, RoutedEventArgs e)
@@ -243,7 +255,7 @@ public partial class MainWindow : Window
         };
         if (dlg.ShowDialog() == true)
         {
-            EnqueueFilesForConversion(dlg.FileNames);
+            SelectFiles(dlg.FileNames);
         }
     }
 
@@ -259,7 +271,7 @@ public partial class MainWindow : Window
     {
         if (e.Data.GetData(DataFormats.FileDrop) is string[] files && files.Length > 0)
         {
-            EnqueueFilesForConversion(files);
+            SelectFiles(files);
         }
     }
 
@@ -360,10 +372,13 @@ public partial class MainWindow : Window
     {
         if (CmbPreset.SelectedItem is ConversionPreset preset)
         {
-            if (!string.IsNullOrWhiteSpace(preset.TargetFormat) && CmbTargetFormat.Items.Contains(preset.TargetFormat))
+            if (!CmbTargetFormat.Items.Contains(preset.TargetFormat))
             {
-                CmbTargetFormat.SelectedItem = preset.TargetFormat;
+                CmbPreset.SelectedIndex = 0;
+                TxtStatusBar.Text = "El formato del preset no es compatible con la selección.";
+                return;
             }
+            CmbTargetFormat.SelectedItem = preset.TargetFormat;
             TxtQuality.Text = preset.Quality.ToString(CultureInfo.InvariantCulture);
             TxtLongestEdge.Text = preset.LongestEdgePx?.ToString(CultureInfo.InvariantCulture) ?? "";
             ChkStripMetadata.IsChecked = preset.StripMetadata;
@@ -490,7 +505,12 @@ public partial class MainWindow : Window
     // --- GENERAL SETTINGS & DOCTOR ---
     private void PopulateGeneralSettingsUi()
     {
-        CmbConflictPolicy.SelectedIndex = _settings.DefaultConflictPolicy == ConflictPolicy.Overwrite ? 1 : 0;
+        CmbConflictPolicy.SelectedIndex = _settings.DefaultConflictPolicy switch
+        {
+            ConflictPolicy.Overwrite => 1,
+            ConflictPolicy.Skip => 2,
+            _ => 0
+        };
         TxtCustomOutputDir.Text = _settings.CustomOutputDirectory ?? "";
         CmbConcurrency.SelectedIndex = _settings.MaxConcurrency switch
         {
@@ -505,9 +525,12 @@ public partial class MainWindow : Window
 
     private void BtnSaveGeneralSettings_Click(object sender, RoutedEventArgs e)
     {
-        _settings.DefaultConflictPolicy = CmbConflictPolicy.SelectedIndex == 1
-            ? ConflictPolicy.Overwrite
-            : ConflictPolicy.AutoRename;
+        _settings.DefaultConflictPolicy = CmbConflictPolicy.SelectedIndex switch
+        {
+            1 => ConflictPolicy.Overwrite,
+            2 => ConflictPolicy.Skip,
+            _ => ConflictPolicy.AutoRename
+        };
 
         _settings.CustomOutputDirectory = TxtCustomOutputDir.Text.Trim();
         _settings.SaveNextToOriginal = string.IsNullOrWhiteSpace(_settings.CustomOutputDirectory);
@@ -535,6 +558,7 @@ public partial class MainWindow : Window
     private async Task RunDoctorDiagnosticsAsync()
     {
         var results = await DoctorService.RunDiagnosticsAsync();
+        DoctorService.UpdateShellConversionMatrix(results);
         await Dispatcher.InvokeAsync(() =>
         {
             LstDoctorResults.Items.Clear();
@@ -687,10 +711,39 @@ public partial class MainWindow : Window
     private void BtnNavPresets_Click(object sender, RoutedEventArgs e) =>
         ShowOnlyView(ViewSettingsPresets, BtnNavPresets, "Presets de Conversión", "Perfiles reutilizables desde el menú contextual, la aplicación de escritorio y el CLI");
 
+    private void RestoreWindow()
+    {
+        Show();
+        WindowState = WindowState.Normal;
+        Activate();
+    }
+
+    protected override async void OnClosing(System.ComponentModel.CancelEventArgs e)
+    {
+        base.OnClosing(e);
+        if (_shutdownComplete || e.Cancel) return;
+
+        e.Cancel = true;
+        if (_settings.KeepRunningInBackground && !_exitRequested)
+        {
+            _tray.Visible = true;
+            Hide();
+            return;
+        }
+
+        if (!IsEnabled) return;
+        IsEnabled = false;
+        _automationService.Dispose();
+        _queue.JobUpdated -= OnJobUpdated;
+        await _queue.DisposeAsync();
+        _shutdownComplete = true;
+        await Dispatcher.InvokeAsync(Close);
+    }
+
     protected override void OnClosed(EventArgs e)
     {
-        _automationService.Dispose();
-        _queue.Dispose();
+        _tray.ContextMenuStrip?.Dispose();
+        _tray.Dispose();
         base.OnClosed(e);
     }
 }

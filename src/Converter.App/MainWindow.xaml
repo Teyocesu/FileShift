@@ -71,6 +71,7 @@
                         <StackPanel Orientation="Horizontal" Margin="0,0,16,4">
                             <TextBlock Text="Destino:" VerticalAlignment="Center" Margin="0,0,6,0" Foreground="{StaticResource TextMuted}" />
                             <ComboBox x:Name="CmbTargetFormat" Width="115" Padding="6,4" />
+                            <Button x:Name="BtnConvertSelection" Content="Convertir selección" Margin="8,0,0,0" Padding="8,4" Click="BtnConvertSelection_Click" />
                         </StackPanel>
 
                         <StackPanel Orientation="Horizontal" Margin="0,0,16,4">
@@ -172,6 +173,7 @@
                                 <ComboBox x:Name="CmbConflictPolicy" Width="290" Padding="6,4">
                                     <ComboBoxItem Content="AutoRename — Crear archivo (1).ext sin sobrescribir" Tag="AutoRename" />
                                     <ComboBoxItem Content="Overwrite — Reemplazar solo tras validar salida" Tag="Overwrite" />
+                                    <ComboBoxItem Content="Skip — Omitir si ya existe un destino" Tag="Skip" />
                                 </ComboBox>
                             </StackPanel>
 

@@ -24,7 +24,6 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
 
 [Languages]
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
@@ -32,12 +31,6 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 Source: "..\dist\win-x64\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "AppxManifest.xml"; DestDir: "{app}"; Flags: ignoreversion
-Source: "Assets\*"; DestDir: "{app}\Assets"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "Register-SparsePackage.ps1"; DestDir: "{app}"; Flags: ignoreversion
-Source: "Unregister-SparsePackage.ps1"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -45,7 +38,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "classicmenu"; Description: "Registrar también menú contextual clásico de respaldo (Show more options)"; GroupDescription: "Integración con Windows Explorer:"
+Name: "classicmenu"; Description: "Registrar también menú contextual clásico de respaldo (Show more options)"; GroupDescription: "Integración con Windows Explorer:"; Flags: unchecked
 
 [Registry]
 ; Respaldo reversible opcional en el menú clásico (HKCU, sin requerir UAC elevado)
@@ -54,8 +47,27 @@ Root: HKCU; Subkey: "Software\Classes\*\shell\FileShift"; ValueType: string; Val
 Root: HKCU; Subkey: "Software\Classes\*\shell\FileShift\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyCliExeName}"" convert --to webp -- ""%1"""; Flags: uninsdeletekey; Tasks: classicmenu
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Register-SparsePackage.ps1"" -InstallDir ""{app}"""; StatusMsg: "Registrando integración con el menú contextual moderno de Windows 11..."; Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
-[UninstallRun]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Unregister-SparsePackage.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "UnregisterFileShiftSparsePkg"
+[Code]
+procedure RunIntegrationScript(const Script: String);
+var
+  ResultCode: Integer;
+begin
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\') + Script + '"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+    RaiseException('FileShift Explorer integration failed. Check engine prerequisites and MSIX certificate trust.');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    RunIntegrationScript('Register-SparsePackage.ps1');
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    RunIntegrationScript('Unregister-SparsePackage.ps1');
+end;

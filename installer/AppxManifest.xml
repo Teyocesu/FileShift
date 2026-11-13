@@ -12,7 +12,7 @@
 
   <Identity
     Name="FileShift.UniversalConverter"
-    Publisher="CN=FileShift Local OpenSource"
+    Publisher="CN=FileShift Development"
     Version="1.0.0.0"
     ProcessorArchitecture="x64" />
 
@@ -49,7 +49,7 @@
         BackgroundColor="#0B0D11"
         Square150x150Logo="Assets\Square150x150Logo.png"
         Square44x44Logo="Assets\Square44x44Logo.png"
-        AppListEntry="default" />
+        AppListEntry="none" />
 
       <Extensions>
         <!-- Registro del servidor COM nativo C++ (IExplorerCommand) -->
@@ -59,7 +59,7 @@
               <com:Class
                 Id="D87E4B9A-6C21-4F08-9E3A-5A18C42B7101"
                 Path="FileShift.Shell.dll"
-                ThreadingModel="Apartment" />
+                ThreadingModel="STA" />
             </com:SurrogateServer>
           </com:ComServer>
         </com:Extension>

@@ -25,3 +25,8 @@ target_link_libraries(FileShift.Shell PRIVATE
     uuid
     advapi32
 )
+
+if(MSVC)
+    set_property(TARGET FileShift.Shell PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    target_compile_options(FileShift.Shell PRIVATE /utf-8)
+endif()
