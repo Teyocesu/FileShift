@@ -150,6 +150,7 @@
                                 <TextBlock Text="Convertir a" FontSize="11" Foreground="{StaticResource TextMuted}" Margin="0,0,0,4" />
                                 <ComboBox x:Name="CmbRuleTargetFormat" Width="100" Padding="6,4" />
                             </StackPanel>
+                            <ComboBox x:Name="CmbRulePreset" Width="145" VerticalAlignment="Bottom" Margin="0,0,14,12" />
                             <CheckBox x:Name="ChkRuleCopyClipboard" Content="Copiar resultado" VerticalAlignment="Bottom" Margin="0,0,14,12" Foreground="{StaticResource TextPrimary}" />
                             <Button Content="Guardar regla" Click="BtnAddRule_Click" VerticalAlignment="Bottom" Margin="0,0,0,8" Padding="14,6" Background="#14B8A6" Foreground="#042F2E" FontWeight="SemiBold" BorderThickness="0" />
                         </WrapPanel>
@@ -223,8 +224,10 @@
                                 <TextBlock Text="Categoría de archivo:" VerticalAlignment="Center" Margin="0,0,10,0" Foreground="{StaticResource TextMuted}" />
                                 <ComboBox x:Name="CmbMenuCategory" Width="160" Padding="6,4" SelectionChanged="CmbMenuCategory_SelectionChanged">
                                     <ComboBoxItem Content="Image" />
+                                    <ComboBoxItem Content="SVG" />
                                     <ComboBoxItem Content="Video" />
                                     <ComboBoxItem Content="Audio" />
+                                    <ComboBoxItem Content="PDF" />
                                     <ComboBoxItem Content="Document" />
                                 </ComboBox>
                                 <TextBlock Text="Agregar formato favorito:" VerticalAlignment="Center" Margin="18,0,8,0" Foreground="{StaticResource TextMuted}" />

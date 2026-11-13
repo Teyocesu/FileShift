@@ -27,8 +27,8 @@ Diseñar e implementar **FileShift**, un convertidor universal de archivos local
 ## 4. Arquitectura de Integración con Windows 11 Explorer (`IExplorerCommand`)
 1. **Servidor COM C++17 (`src/Converter.Shell/FileShift.Shell.dll`)**:
    - Implementa `IExplorerCommand` (`RootExplorerCommand`, `SubExplorerCommand`) e `IEnumExplorerCommand` (`EnumExplorerCommand`) con conteo de referencias thread-safe (`g_dllRefCount`).
-   - Lee `%LOCALAPPDATA%\FileShift\menu-cache.json` (generado por `UserSettingsStore.Save`) para respetar el estado `ENABLED=0/1` y el orden de formatos favoritos por categoría (`FAV_image`, `FAV_video`, `FAV_audio`, `FAV_pdf`, `FAV_document`).
-   - Agrupa los formatos restantes en el submenú en cascada `Más formatos…` (`ECF_HASSUBCOMMANDS`) e incluye `Abrir en FileShift…`.
+   - Lee `%LOCALAPPDATA%\FileShift\menu-cache.json` (generado por `UserSettingsStore.Save`) y `menu-formats.txt` generado por Doctor para filtrar motores y formatos. Respeta el estado `ENABLED=0/1` y el orden de formatos favoritos por categoría (`FAV_image`, `FAV_video`, `FAV_audio`, `FAV_pdf`, `FAV_document`).
+   - Muestra favoritos primero, luego los demás formatos compatibles y `Abrir en FileShift…` en un único nivel de subcomandos compatible con Explorer.
    - Soporta rutas largas (`32768` `wchar_t`), divide lotes grandes en invocaciones de `< 24.000` caracteres hacia `fileshift.exe convert --to <fmt> -- ...` (`CreateProcessW` con `CREATE_NO_WINDOW`) y registra errores de lanzamiento en `%LOCALAPPDATA%\FileShift\shell-errors.log`.
 2. **Empaquetado MSIX Sparse Package (`installer/`)**:
    - `AppxManifest.xml` declara `windows.fileExplorerContextMenus` y `com:ComServer` (`CLSID {D87E4B9A-6C21-4F08-9E3A-5A18C42B7101}`) con assets visuales en `installer/Assets/` (`StoreLogo.png`, `Square150x150Logo.png`, `Square44x44Logo.png`).

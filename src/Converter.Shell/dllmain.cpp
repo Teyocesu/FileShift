@@ -1,4 +1,5 @@
 #include "ExplorerCommand.h"
+#include <new>
 
 std::atomic<long> g_dllRefCount{ 0 };
 HMODULE g_hModule = nullptr;
@@ -39,8 +40,11 @@ public:
 
     IFACEMETHODIMP CreateInstance(IUnknown* pUnkOuter, REFIID riid, void** ppv) override
     {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
         if (pUnkOuter) return CLASS_E_NOAGGREGATION;
-        auto* cmd = new RootExplorerCommand();
+        auto* cmd = new (std::nothrow) RootExplorerCommand();
+        if (!cmd) return E_OUTOFMEMORY;
         HRESULT hr = cmd->QueryInterface(riid, ppv);
         cmd->Release();
         return hr;
@@ -80,7 +84,8 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv)
 
     if (rclsid == CLSID_FileShiftExplorerCommand)
     {
-        auto* factory = new FileShiftClassFactory();
+        auto* factory = new (std::nothrow) FileShiftClassFactory();
+        if (!factory) return E_OUTOFMEMORY;
         HRESULT hr = factory->QueryInterface(riid, ppv);
         factory->Release();
         return hr;

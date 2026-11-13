@@ -19,9 +19,7 @@ struct TargetMenuEntry
 {
     std::wstring formatId;
     std::wstring title;
-    std::wstring requiredCategory;
     bool isOpenMoreDialog = false;
-    std::vector<TargetMenuEntry> children;
 };
 
 class SubExplorerCommand final : public IExplorerCommand

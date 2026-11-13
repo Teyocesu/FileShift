@@ -63,6 +63,7 @@ public static class SafeFilePolicy
                             {
                                 RollBack(published);
                                 verifyOriginal();
+                                ct.ThrowIfCancellationRequested();
                                 return [];
                             }
 
@@ -77,7 +78,7 @@ public static class SafeFilePolicy
                                 {
                                     File.Replace(stagedPath, candidate, backup);
                                 }
-                                catch (IOException ex) when (File.Exists(backup))
+                                catch (Exception ex) when (File.Exists(backup) && ex is IOException or UnauthorizedAccessException)
                                 {
                                     if (!Path.Exists(candidate))
                                     {

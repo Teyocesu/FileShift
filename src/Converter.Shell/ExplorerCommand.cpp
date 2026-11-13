@@ -5,7 +5,6 @@
 #include <fstream>
 #include <sstream>
 #include <map>
-#include <set>
 #include <new>
 
 namespace
@@ -256,42 +255,18 @@ namespace
         const auto it = cfg.favoritesByCategory.find(category);
         const auto favorites = it == cfg.favoritesByCategory.end() ? std::vector<std::wstring>{} : it->second;
 
-        std::vector<std::wstring> addedFormats;
-
-        // 1. Add user-configured favorite formats first (if valid for this category)
-        for (const auto& fav : favorites)
+        auto addFormat = [&](const std::wstring& format)
         {
-            if (std::find(allSupported.begin(), allSupported.end(), fav) != allSupported.end() &&
-                std::find(addedFormats.begin(), addedFormats.end(), fav) == addedFormats.end())
-            {
-                entries.push_back({ fav, FormatDisplayTitle(category, fav), category, false, {} });
-                addedFormats.push_back(fav);
-            }
-        }
+            if (std::none_of(entries.begin(), entries.end(), [&](const auto& entry) { return entry.formatId == format; }))
+                entries.push_back({ format, FormatDisplayTitle(category, format) });
+        };
+        for (const auto& favorite : favorites)
+            if (std::find(allSupported.begin(), allSupported.end(), favorite) != allSupported.end())
+                addFormat(favorite);
+        for (const auto& format : allSupported)
+            addFormat(format);
 
-        // 2. Group remaining supported formats into cascading submenu "Más formatos…"
-        std::vector<TargetMenuEntry> remainingEntries;
-        for (const auto& fmt : allSupported)
-        {
-            if (std::find(addedFormats.begin(), addedFormats.end(), fmt) == addedFormats.end())
-            {
-                remainingEntries.push_back({ fmt, FormatDisplayTitle(category, fmt), category, false, {} });
-            }
-        }
-
-        // Always allow opening the full FileShift desktop app with the selected files
-        remainingEntries.push_back({ L"", L"Abrir en FileShift…", category, true, {} });
-
-        if (entries.empty())
-        {
-            // If all favorites matched source extension, promote remaining entries to top level
-            entries = std::move(remainingEntries);
-        }
-        else
-        {
-            entries.push_back({ L"", L"Más formatos…", category, true, std::move(remainingEntries) });
-        }
-
+        entries.push_back({ L"", L"Abrir en FileShift…", true });
         return entries;
     }
 
@@ -378,7 +353,7 @@ IFACEMETHODIMP SubExplorerCommand::GetCanonicalName(GUID* pguidCommandName)
     return E_NOTIMPL;
 }
 
-IFACEMETHODIMP SubExplorerCommand::GetState(IShellItemArray* psiItemArray, BOOL, EXPCMDSTATE* pCmdState)
+IFACEMETHODIMP SubExplorerCommand::GetState(IShellItemArray* psiItemArray, BOOL, EXPCMDSTATE* pCmdState) try
 {
     if (!pCmdState) return E_POINTER;
 
@@ -398,29 +373,26 @@ IFACEMETHODIMP SubExplorerCommand::GetState(IShellItemArray* psiItemArray, BOOL,
     *pCmdState = ECS_ENABLED;
     return S_OK;
 }
+catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+catch (...) { return E_FAIL; }
 
 IFACEMETHODIMP SubExplorerCommand::GetFlags(EXPCMDFLAGS* pFlags)
 {
     if (!pFlags) return E_POINTER;
-    *pFlags = m_entry.children.empty() ? ECF_DEFAULT : ECF_HASSUBCOMMANDS;
+    *pFlags = ECF_DEFAULT;
     return S_OK;
 }
 
 IFACEMETHODIMP SubExplorerCommand::EnumSubCommands(IEnumExplorerCommand** ppEnum)
 {
     if (!ppEnum) return E_POINTER;
-    if (m_entry.children.empty())
-    {
-        *ppEnum = nullptr;
-        return E_NOTIMPL;
-    }
-    *ppEnum = new EnumExplorerCommand(m_entry.children);
-    return S_OK;
+    *ppEnum = nullptr;
+    return E_NOTIMPL;
 }
 
-IFACEMETHODIMP SubExplorerCommand::Invoke(IShellItemArray* psiItemArray, IBindCtx*)
+IFACEMETHODIMP SubExplorerCommand::Invoke(IShellItemArray* psiItemArray, IBindCtx*) try
 {
-    if (!psiItemArray || !m_entry.children.empty()) return E_INVALIDARG;
+    if (!psiItemArray) return E_INVALIDARG;
     EXPCMDSTATE state;
     if (FAILED(GetState(psiItemArray, FALSE, &state)) || state != ECS_ENABLED)
         return E_INVALIDARG;
@@ -512,6 +484,8 @@ IFACEMETHODIMP SubExplorerCommand::Invoke(IShellItemArray* psiItemArray, IBindCt
 
     return S_OK;
 }
+catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+catch (...) { return E_FAIL; }
 
 // ============================================================================
 // EnumExplorerCommand
@@ -559,7 +533,14 @@ IFACEMETHODIMP EnumExplorerCommand::Next(ULONG celt, IExplorerCommand** pUIComma
     ULONG fetched = 0;
     while (fetched < celt && m_currentIndex < m_entries.size())
     {
-        pUICommand[fetched] = new SubExplorerCommand(m_entries[m_currentIndex]);
+        try { pUICommand[fetched] = new SubExplorerCommand(m_entries[m_currentIndex]); }
+        catch (const std::bad_alloc&)
+        {
+            m_currentIndex -= fetched;
+            while (fetched > 0) pUICommand[--fetched]->Release();
+            if (pceltFetched) *pceltFetched = 0;
+            return E_OUTOFMEMORY;
+        }
         ++m_currentIndex;
         ++fetched;
     }
@@ -588,7 +569,10 @@ IFACEMETHODIMP EnumExplorerCommand::Reset()
 IFACEMETHODIMP EnumExplorerCommand::Clone(IEnumExplorerCommand** ppenum)
 {
     if (!ppenum) return E_POINTER;
-    auto* cloned = new EnumExplorerCommand(m_entries);
+    *ppenum = nullptr;
+    EnumExplorerCommand* cloned;
+    try { cloned = new EnumExplorerCommand(m_entries); }
+    catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
     cloned->m_currentIndex = m_currentIndex;
     *ppenum = cloned;
     return S_OK;
@@ -656,7 +640,7 @@ IFACEMETHODIMP RootExplorerCommand::GetCanonicalName(GUID* pguidCommandName)
     return S_OK;
 }
 
-IFACEMETHODIMP RootExplorerCommand::GetState(IShellItemArray* psiItemArray, BOOL, EXPCMDSTATE* pCmdState)
+IFACEMETHODIMP RootExplorerCommand::GetState(IShellItemArray* psiItemArray, BOOL, EXPCMDSTATE* pCmdState) try
 {
     if (!pCmdState) return E_POINTER;
     *pCmdState = ECS_HIDDEN;
@@ -683,6 +667,8 @@ IFACEMETHODIMP RootExplorerCommand::GetState(IShellItemArray* psiItemArray, BOOL
 
     return S_OK;
 }
+catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+catch (...) { return E_FAIL; }
 
 IFACEMETHODIMP RootExplorerCommand::Invoke(IShellItemArray*, IBindCtx*)
 {
@@ -704,6 +690,7 @@ IFACEMETHODIMP RootExplorerCommand::EnumSubCommands(IEnumExplorerCommand** ppEnu
     *ppEnum = nullptr;
     if (m_cachedSubCommands.empty()) return E_NOTIMPL;
 
-    *ppEnum = new EnumExplorerCommand(m_cachedSubCommands);
+    try { *ppEnum = new EnumExplorerCommand(m_cachedSubCommands); }
+    catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
     return S_OK;
 }

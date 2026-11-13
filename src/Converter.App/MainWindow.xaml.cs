@@ -39,7 +39,7 @@ public partial class MainWindow : Window
             _settings.MaxConcurrency,
             new OutputIntegrityValidator());
 
-        _automationService = new FolderAutomationService(_queue, () => _settings.Presets.ToArray());
+        _automationService = new FolderAutomationService(_queue, () => Dispatcher.Invoke(() => _settings.Presets.ToArray()));
         _automationService.SyncRules(_settings.Automations);
 
         _queue.JobUpdated += OnJobUpdated;
@@ -129,6 +129,18 @@ public partial class MainWindow : Window
             }
             if (job.Status == JobStatus.Completed)
             {
+                if (job.OutputPath is { } path && job.Options.TriggeredBy.StartsWith("Automation:", StringComparison.Ordinal) &&
+                    _settings.Automations.Any(rule => rule.CopyConvertedFile && job.Options.TriggeredBy == $"Automation:{rule.Id}"))
+                {
+                    var paths = new System.Collections.Specialized.StringCollection { path };
+                    paths.AddRange(job.AdditionalOutputPaths.ToArray());
+                    try { Clipboard.SetFileDropList(paths); }
+                    catch (System.Runtime.InteropServices.ExternalException)
+                    {
+                        TxtStatusBar.Text = "Se completó la conversión. El portapapeles está ocupado.";
+                        return;
+                    }
+                }
                 TxtStatusBar.Text = $"Completado: {Path.GetFileName(job.InputPath)} -> {Path.GetFileName(job.OutputPath)} (SHA-256 original verificado)";
                 if (_settings.RevealInExplorerWhenDone && !string.IsNullOrWhiteSpace(job.OutputPath))
                 {
@@ -358,14 +370,18 @@ public partial class MainWindow : Window
         CmbPreset.Items.Clear();
         CmbPreset.Items.Add("(Sin preset — manual)");
         LstPresets.Items.Clear();
+        CmbRulePreset.Items.Clear();
+        CmbRulePreset.Items.Add("(Sin preset)");
 
         foreach (var preset in _settings.Presets)
         {
             CmbPreset.Items.Add(preset);
+            CmbRulePreset.Items.Add(preset);
             var edgeInfo = preset.LongestEdgePx.HasValue ? $"{preset.LongestEdgePx.Value}px" : "Original";
             LstPresets.Items.Add($"{preset.Name} [{preset.Id}] -> {preset.TargetFormat.ToUpperInvariant()} | Calidad: {preset.Quality} | Escala: {edgeInfo}");
         }
         CmbPreset.SelectedIndex = 0;
+        CmbRulePreset.SelectedIndex = 0;
     }
 
     private void CmbPreset_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -442,7 +458,8 @@ public partial class MainWindow : Window
         var name = TxtRuleName.Text.Trim();
         var folder = TxtRuleFolder.Text.Trim();
         var filterRaw = string.IsNullOrWhiteSpace(TxtRuleFilter.Text) ? "png;jpg" : TxtRuleFilter.Text.Trim();
-        var target = CmbRuleTargetFormat.SelectedItem as string ?? "webp";
+        var preset = CmbRulePreset.SelectedItem as ConversionPreset;
+        var target = preset?.TargetFormat ?? CmbRuleTargetFormat.SelectedItem as string ?? "webp";
 
         if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(folder))
             return;
@@ -460,8 +477,8 @@ public partial class MainWindow : Window
             SourceDirectory: folder,
             AllowedInputFormats: allowed,
             TargetFormat: target,
-            PresetId: null,
-            OutputDirectory: null,
+            PresetId: preset?.Id,
+            OutputDirectory: _settings.SaveNextToOriginal ? null : _settings.CustomOutputDirectory,
             ConflictPolicy: _settings.DefaultConflictPolicy,
             CopyConvertedFile: ChkRuleCopyClipboard.IsChecked == true,
             LastResult: "Vigilando carpeta activamente");
@@ -713,6 +730,7 @@ public partial class MainWindow : Window
 
     private void RestoreWindow()
     {
+        _tray.Visible = false;
         Show();
         WindowState = WindowState.Normal;
         Activate();

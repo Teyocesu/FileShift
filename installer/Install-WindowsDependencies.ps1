@@ -6,13 +6,19 @@ $engines = Join-Path $env:LOCALAPPDATA 'FileShift/engines'
 
 function Get-VerifiedDownload($Url, $Hash) {
     $path = Join-Path $temp ([IO.Path]::GetFileName($Url))
-    Invoke-WebRequest -Uri $Url -OutFile $path -UseBasicParsing
+    Write-Host "Descargando $Url"
+    Invoke-WebRequest -Uri $Url -OutFile $path -UseBasicParsing -TimeoutSec 180
     if ((Get-FileHash -LiteralPath $path).Hash -ne $Hash) { throw "SHA-256 incorrecto: $Url" }
     return $path
 }
 
 function Install-Program($Path, $Arguments) {
-    $process = Start-Process -FilePath $Path -ArgumentList $Arguments -Wait -PassThru
+    Write-Host "Instalando $([IO.Path]::GetFileName($Path))"
+    $process = Start-Process -FilePath $Path -ArgumentList $Arguments -PassThru
+    if (!$process.WaitForExit(180000)) {
+        $process.Kill()
+        throw "Tiempo de instalación agotado: $Path"
+    }
     if ($process.ExitCode -ne 0) { throw "$Path terminó con código $($process.ExitCode)" }
 }
 

@@ -177,6 +177,8 @@ public sealed class ConversionQueue : IDisposable, IAsyncDisposable
             stagingDirectory = Path.Combine(outputDirectory, $".fileshift.tmp.{Guid.NewGuid():N}");
             Directory.CreateDirectory(stagingDirectory);
             var fileName = Path.GetFileNameWithoutExtension(job.InputPath) + "." + targetDescriptor.Extension;
+            if (string.Equals(fileName, job.FileName, StringComparison.OrdinalIgnoreCase))
+                fileName = Path.GetFileNameWithoutExtension(job.InputPath) + " (converted)." + targetDescriptor.Extension;
             var tempPath = Path.Combine(stagingDirectory, fileName);
 
             var adapter = ResolveAdapter(job.SourceFormat, job.TargetFormat);
@@ -205,13 +207,14 @@ public sealed class ConversionQueue : IDisposable, IAsyncDisposable
 
             var stagedPaths = new[] { tempPath }.Concat(
                 Directory.EnumerateFiles(stagingDirectory).Where(path => path != tempPath)
-                    .Order(StringComparer.Ordinal)).ToArray();
+                    .OrderBy(path => path.Length).ThenBy(path => path, StringComparer.Ordinal)).ToArray();
             foreach (var stagedPath in stagedPaths)
                 await ValidateTemporaryOutputBeforePublishAsync(stagedPath, job.TargetFormat, job, ct);
 
+            using var original = File.OpenRead(job.InputPath);
             void VerifyOriginal()
             {
-                using var original = File.OpenRead(job.InputPath);
+                original.Position = 0;
                 job.PostOriginalSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(original));
                 job.OriginalIntactVerified = job.OriginalSha256 == job.PostOriginalSha256;
                 if (!job.OriginalIntactVerified)

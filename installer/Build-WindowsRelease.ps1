@@ -95,13 +95,14 @@ try {
     if ((Get-FileHash "$stage/AppxManifest.xml").Hash -ne (Get-FileHash "$verified/AppxManifest.xml").Hash) {
         throw 'El manifiesto extraído no coincide.'
     }
+    $previousConfig = $env:FILESHIFT_CONFIG_DIR
     $env:FILESHIFT_CONFIG_DIR = Join-Path $root 'dist/smoke-settings'
     Invoke-Checked "$output/fileshift.exe" @('doctor')
     $smoke = Join-Path $root 'dist/smoke'
     New-Item -ItemType Directory -Path $smoke -Force | Out-Null
     $png = Join-Path $smoke 'prueba ñ shell.png'
     $second = Join-Path $smoke 'segundo shell.png'
-    Invoke-Checked magick @('-size', '24x24', 'xc:red', $png)
+    Invoke-Checked magick.exe @('-size', '24x24', 'xc:red', $png)
     Copy-Item -LiteralPath $png -Destination $second -Force
     $hash = (Get-FileHash -LiteralPath $png).Hash
     Invoke-Checked "$output/fileshift.exe" @('convert', '--to', 'webp', '--auto-rename', '--', $png, $second)
@@ -109,6 +110,7 @@ try {
         if (!(Test-Path -LiteralPath ([IO.Path]::ChangeExtension($inputFile, '.webp'))) -or
             (Get-FileHash -LiteralPath $inputFile).Hash -ne $hash) { throw 'Falló el smoke test de la CLI.' }
     }
+    $env:FILESHIFT_CONFIG_DIR = $previousConfig
     $name = if ($Development) { 'FileShift-Setup-Development-win-x64' } else { 'FileShift-Setup-win-x64' }
     Invoke-Checked $iscc @("/O$installer", "/F$name", "$PSScriptRoot/FileShift.iss")
     $setup = "$installer/$name.exe"
