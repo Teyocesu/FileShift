@@ -49,8 +49,9 @@ public sealed class ConversionPipelineTests
         args.Add("-c:a"); args.Add("aac");
         args.Add(path);
         proc.Start();
+        var stderr = proc.StandardError.ReadToEndAsync();
         await proc.WaitForExitAsync();
-        Assert.Equal(0, proc.ExitCode);
+        Assert.True(proc.ExitCode == 0, await stderr);
     }
 
     private static async Task CreateMultiPagePdfAsync(string path)
@@ -76,8 +77,10 @@ public sealed class ConversionPipelineTests
         args.Add("-c");
         args.Add("<< /PageSize [200 200] >> setpagedevice 0.1 0.6 0.5 setrgbcolor 20 20 160 160 rectfill showpage 0.2 0.3 0.8 setrgbcolor 30 30 140 140 rectfill showpage");
         proc.Start();
+        var stderr = proc.StandardError.ReadToEndAsync();
+        var stdout = proc.StandardOutput.ReadToEndAsync();
         await proc.WaitForExitAsync();
-        Assert.Equal(0, proc.ExitCode);
+        Assert.True(proc.ExitCode == 0, (await stderr) + (await stdout));
     }
 
     private sealed class CorruptOutputAdapter(byte[] payloadToWrite, bool mutateInputFile = false) : IConversionEngineAdapter
