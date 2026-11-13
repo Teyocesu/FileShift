@@ -2,13 +2,23 @@ using System.Collections.Concurrent;
 
 namespace FileShift.Core;
 
-public sealed class ConversionQueue : IDisposable
+public sealed class ConversionQueue : IDisposable, IAsyncDisposable
 {
     private readonly IReadOnlyList<IConversionEngineAdapter> _adapters;
     private readonly IOutputIntegrityValidator? _validator;
-    private SemaphoreSlim _concurrencyGate;
+    private readonly object _gate = new();
+    private int _maxConcurrency;
+    private int _running;
+    private bool _disposed;
+    private TaskCompletionSource _capacityChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly ConcurrentDictionary<string, ConversionJob> _jobs = new();
-    private readonly ConcurrentDictionary<string, CancellationTokenSource> _jobTokens = new();
+    private readonly Dictionary<string, JobExecution> _executions = new();
+
+    private sealed class JobExecution
+    {
+        public CancellationTokenSource Cancellation { get; } = new();
+        public TaskCompletionSource<ConversionJob> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
 
     public event Action<ConversionJob>? JobUpdated;
 
@@ -19,12 +29,16 @@ public sealed class ConversionQueue : IDisposable
     {
         _adapters = adapters.ToList();
         _validator = validator;
-        _concurrencyGate = new SemaphoreSlim(Math.Clamp(maxConcurrency, 1, 16));
+        _maxConcurrency = Math.Clamp(maxConcurrency, 1, 16);
     }
 
     public void UpdateMaxConcurrency(int maxConcurrency)
     {
-        _concurrencyGate = new SemaphoreSlim(Math.Clamp(maxConcurrency, 1, 16));
+        lock (_gate)
+        {
+            _maxConcurrency = Math.Clamp(maxConcurrency, 1, 16);
+            SignalCapacityChanged();
+        }
     }
 
     public IReadOnlyCollection<ConversionJob> Jobs => _jobs.Values
@@ -57,55 +71,77 @@ public sealed class ConversionQueue : IDisposable
             Options = options ?? new ConversionOptions()
         };
 
-        _jobs[job.Id] = job;
-        var cts = new CancellationTokenSource();
-        _jobTokens[job.Id] = cts;
+        var execution = new JobExecution();
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _jobs[job.Id] = job;
+            _executions.Add(job.Id, execution);
+        }
 
-        Notify(job);
-        _ = ExecuteJobAsync(job, cts.Token);
+        _ = Task.Run(() => ExecuteJobAsync(job, execution));
         return job;
     }
 
     public bool CancelJob(string jobId)
     {
-        if (_jobTokens.TryRemove(jobId, out var cts))
+        lock (_gate)
         {
-            cts.Cancel();
-            cts.Dispose();
-            if (_jobs.TryGetValue(jobId, out var job) &&
-                job.Status is not (JobStatus.Completed or JobStatus.Failed))
-            {
-                job.Status = JobStatus.Cancelled;
-                job.CompletedAt = DateTimeOffset.UtcNow;
-                job.ErrorMessage = "Operación cancelada por el usuario sin publicar resultados parciales.";
-                Notify(job);
-            }
+            if (!_executions.TryGetValue(jobId, out var execution) ||
+                execution.Cancellation.IsCancellationRequested)
+                return false;
+
+            execution.Cancellation.Cancel();
             return true;
         }
-        return false;
     }
 
-    public async Task<ConversionJob> WaitForJobAsync(string jobId, CancellationToken ct = default)
+    public Task<ConversionJob> WaitForJobAsync(string jobId, CancellationToken ct = default)
     {
-        while (!ct.IsCancellationRequested)
+        lock (_gate)
         {
-            if (_jobs.TryGetValue(jobId, out var job) &&
-                job.Status is JobStatus.Completed or JobStatus.Failed or JobStatus.Cancelled)
-            {
-                return job;
-            }
-            await Task.Delay(35, ct);
+            if (_executions.TryGetValue(jobId, out var execution))
+                return execution.Completion.Task.WaitAsync(ct);
+            if (_jobs.TryGetValue(jobId, out var job))
+                return Task.FromResult(job);
+            throw new KeyNotFoundException($"Trabajo desconocido: {jobId}");
         }
-        throw new OperationCanceledException();
     }
 
-    private async Task ExecuteJobAsync(ConversionJob job, CancellationToken ct)
+    private void SignalCapacityChanged()
     {
-        string? tempPath = null;
+        _capacityChanged.TrySetResult();
+        _capacityChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private async Task AcquireCapacityAsync(CancellationToken ct)
+    {
+        while (true)
+        {
+            Task changed;
+            lock (_gate)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (_running < _maxConcurrency)
+                {
+                    _running++;
+                    return;
+                }
+                changed = _capacityChanged.Task;
+            }
+            await changed.WaitAsync(ct);
+        }
+    }
+
+    private async Task ExecuteJobAsync(ConversionJob job, JobExecution execution)
+    {
+        var ct = execution.Cancellation.Token;
+        var status = JobStatus.Failed;
+        string? stagingDirectory = null;
         bool gateAcquired = false;
         try
         {
-            await _concurrencyGate.WaitAsync(ct);
+            await AcquireCapacityAsync(ct);
             gateAcquired = true;
             ct.ThrowIfCancellationRequested();
 
@@ -130,38 +166,18 @@ public sealed class ConversionQueue : IDisposable
 
             job.SourceFormat = inspection.DetectedFormat;
 
-            if (!FormatMatrix.CanConvert(job.SourceFormat, job.TargetFormat))
+            if (!FormatMatrix.CanConvert(job.SourceFormat, job.TargetFormat, libreOfficeInstalled: true))
             {
                 throw new NotSupportedException(
                     $"Conversión no soportada: {job.SourceFormat.ToUpperInvariant()} → {job.TargetFormat.ToUpperInvariant()}.");
             }
 
             var targetDescriptor = FormatMatrix.Formats[job.TargetFormat];
-            var finalOutputPath = SafeFilePolicy.ResolveFinalOutputPath(
-                job.InputPath,
-                targetDescriptor.Extension,
-                job.Options.CustomOutputDirectory,
-                job.Options.ConflictPolicy);
-
-            // ConflictPolicy.Skip when destination already exists
-            if (finalOutputPath is null)
-            {
-                job.PostOriginalSha256 = await SafeFilePolicy.ComputeSha256Async(job.InputPath, ct);
-                job.OriginalIntactVerified = string.Equals(job.OriginalSha256, job.PostOriginalSha256, StringComparison.OrdinalIgnoreCase);
-                if (!job.OriginalIntactVerified)
-                {
-                    throw new InvalidOperationException("Fallo crítico de invariante INV-01: el hash SHA-256 del archivo original fue alterado.");
-                }
-
-                job.ProbeSummary = "Omitido (el destino ya existía y la política es Skip)";
-                job.Status = JobStatus.Completed;
-                job.CompletedAt = DateTimeOffset.UtcNow;
-                job.ProgressPercent = 100;
-                Notify(job);
-                return;
-            }
-
-            tempPath = SafeFilePolicy.CreateTemporaryOutputPath(finalOutputPath, job.Id);
+            var outputDirectory = SafeFilePolicy.GetOutputDirectory(job.InputPath, job.Options.CustomOutputDirectory);
+            stagingDirectory = Path.Combine(outputDirectory, $".fileshift.tmp.{Guid.NewGuid():N}");
+            Directory.CreateDirectory(stagingDirectory);
+            var fileName = Path.GetFileNameWithoutExtension(job.InputPath) + "." + targetDescriptor.Extension;
+            var tempPath = Path.Combine(stagingDirectory, fileName);
 
             var adapter = ResolveAdapter(job.SourceFormat, job.TargetFormat);
             if (!await adapter.IsAvailableAsync(ct))
@@ -174,7 +190,7 @@ public sealed class ConversionQueue : IDisposable
             job.ProgressPercent = 15;
             Notify(job);
 
-            var progress = new Progress<double>(p =>
+            var progress = new InlineProgress(p =>
             {
                 job.ProgressPercent = Math.Clamp(p, 1, 95);
                 Notify(job);
@@ -183,73 +199,79 @@ public sealed class ConversionQueue : IDisposable
             await adapter.ConvertAsync(job, tempPath, progress, ct);
             ct.ThrowIfCancellationRequested();
 
-            // P0 FIX: Validate temporary file BEFORE publishing to finalOutputPath!
-            // If Overwrite is enabled and tempPath is invalid/corrupted/wrong format,
-            // the existing file at finalOutputPath remains 100% untouched!
             job.Status = JobStatus.Validating;
             job.ProgressPercent = 96;
             Notify(job);
 
-            await ValidateTemporaryOutputBeforePublishAsync(tempPath, job.TargetFormat, job, ct);
+            var stagedPaths = new[] { tempPath }.Concat(
+                Directory.EnumerateFiles(stagingDirectory).Where(path => path != tempPath)
+                    .Order(StringComparer.Ordinal)).ToArray();
+            foreach (var stagedPath in stagedPaths)
+                await ValidateTemporaryOutputBeforePublishAsync(stagedPath, job.TargetFormat, job, ct);
 
-            // P0 FIX: Verify original file SHA-256 invariance BEFORE and AFTER publishing.
-            // Any alteration of the original file is an explicit FAILED state, never Completed.
-            var prePublishOriginalSha = await SafeFilePolicy.ComputeSha256Async(job.InputPath, ct);
-            if (!string.Equals(job.OriginalSha256, prePublishOriginalSha, StringComparison.OrdinalIgnoreCase))
+            void VerifyOriginal()
             {
-                throw new InvalidOperationException(
-                    "Violación crítica de invariante INV-01: el archivo original fue modificado durante la conversión.");
+                using var original = File.OpenRead(job.InputPath);
+                job.PostOriginalSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(original));
+                job.OriginalIntactVerified = job.OriginalSha256 == job.PostOriginalSha256;
+                if (!job.OriginalIntactVerified)
+                    throw new InvalidOperationException("Violación de INV-01: el SHA-256 del archivo original no coincide.");
             }
 
-            // Now atomically publish the validated temporary file to finalOutputPath
-            SafeFilePolicy.PublishValidatedAtomicOutput(tempPath, finalOutputPath, job.Options.ConflictPolicy);
-            tempPath = null; // Published
-
-            job.PostOriginalSha256 = await SafeFilePolicy.ComputeSha256Async(job.InputPath, ct);
-            job.OriginalIntactVerified = string.Equals(job.OriginalSha256, job.PostOriginalSha256, StringComparison.OrdinalIgnoreCase);
-            if (!job.OriginalIntactVerified)
-            {
-                throw new InvalidOperationException(
-                    "Violación crítica de invariante INV-01 tras publicar: el SHA-256 del archivo original no coincide.");
-            }
-
-            job.OutputPath = finalOutputPath;
-            job.OutputSizeBytes = new FileInfo(finalOutputPath).Length;
+            VerifyOriginal();
+            var outputSize = new FileInfo(tempPath).Length;
+            var published = SafeFilePolicy.PublishOutputs(
+                stagedPaths, outputDirectory, job.InputPath, job.Options.ConflictPolicy, VerifyOriginal, ct);
+            job.OutputPath = published.FirstOrDefault();
+            job.AdditionalOutputPaths.AddRange(published.Skip(1));
+            if (published.Count == 0)
+                job.ProbeSummary = "Trabajo omitido porque un destino ya existía (Skip).";
+            else
+                job.OutputSizeBytes = outputSize;
             job.ProgressPercent = 100;
-            job.Status = JobStatus.Completed;
-            job.CompletedAt = DateTimeOffset.UtcNow;
-            Notify(job);
+            status = JobStatus.Completed;
         }
         catch (OperationCanceledException)
         {
-            SafeFilePolicy.SafeDeleteTemp(tempPath);
-            CleanupAdditionalOutputs(job);
             await VerifyOriginalOnAbortAsync(job);
             job.OutputPath = null;
-            job.Status = JobStatus.Cancelled;
-            job.CompletedAt = DateTimeOffset.UtcNow;
-            job.ErrorMessage = "Operación cancelada por el usuario sin publicar resultados parciales.";
-            Notify(job);
+            status = JobStatus.Cancelled;
+            job.ErrorMessage = "Operación cancelada por el usuario.";
         }
         catch (Exception ex)
         {
-            SafeFilePolicy.SafeDeleteTemp(tempPath);
-            CleanupAdditionalOutputs(job);
             await VerifyOriginalOnAbortAsync(job);
             job.OutputPath = null;
-            job.Status = JobStatus.Failed;
-            job.CompletedAt = DateTimeOffset.UtcNow;
             job.ErrorMessage = ex.Message;
-            Notify(job);
         }
         finally
         {
-            _jobTokens.TryRemove(job.Id, out _);
-            if (gateAcquired)
+            if (stagingDirectory is not null)
             {
-                _concurrencyGate.Release();
+                try { Directory.Delete(stagingDirectory, recursive: true); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
             }
+            lock (_gate)
+            {
+                if (gateAcquired)
+                {
+                    _running--;
+                    SignalCapacityChanged();
+                }
+                execution.Cancellation.Dispose();
+                job.CompletedAt = DateTimeOffset.UtcNow;
+                job.Status = status;
+                execution.Completion.TrySetResult(job);
+                _executions.Remove(job.Id);
+            }
+            Notify(job);
         }
+    }
+
+    private sealed class InlineProgress(Action<double> report) : IProgress<double>
+    {
+        public void Report(double value) => report(value);
     }
 
     private async Task ValidateTemporaryOutputBeforePublishAsync(
@@ -388,15 +410,6 @@ public sealed class ConversionQueue : IDisposable
         }
     }
 
-    private static void CleanupAdditionalOutputs(ConversionJob job)
-    {
-        foreach (var extra in job.AdditionalOutputPaths)
-        {
-            SafeFilePolicy.SafeDeleteTemp(extra);
-        }
-        job.AdditionalOutputPaths.Clear();
-    }
-
     private IConversionEngineAdapter ResolveAdapter(string sourceFormat, string targetFormat)
     {
         var srcCat = FormatMatrix.Formats[sourceFormat].Category;
@@ -414,15 +427,28 @@ public sealed class ConversionQueue : IDisposable
                ?? throw new InvalidOperationException($"Motor requerido no registrado: {requiredEngine}");
     }
 
-    private void Notify(ConversionJob job) => JobUpdated?.Invoke(job);
-
-    public void Dispose()
+    private void Notify(ConversionJob job)
     {
-        foreach (var cts in _jobTokens.Values)
+        if (JobUpdated is not { } updated) return;
+        foreach (Action<ConversionJob> subscriber in updated.GetInvocationList())
         {
-            cts.Cancel();
-            cts.Dispose();
+            try { subscriber(job); }
+            catch (Exception ex) { System.Diagnostics.Trace.TraceError(ex.ToString()); }
         }
-        _concurrencyGate.Dispose();
+    }
+
+    public void Dispose() => DisposeAsync().AsTask().GetAwaiter().GetResult();
+
+    public async ValueTask DisposeAsync()
+    {
+        Task[] pending;
+        lock (_gate)
+        {
+            _disposed = true;
+            pending = _executions.Values.Select(execution => (Task)execution.Completion.Task).ToArray();
+            foreach (var execution in _executions.Values)
+                execution.Cancellation.Cancel();
+        }
+        await Task.WhenAll(pending).ConfigureAwait(false);
     }
 }

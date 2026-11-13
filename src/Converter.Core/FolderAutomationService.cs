@@ -5,13 +5,16 @@ namespace FileShift.Core;
 public sealed class FolderAutomationService : IDisposable
 {
     private readonly ConversionQueue _queue;
+    private readonly Func<IReadOnlyList<ConversionPreset>> _getPresets;
+    private readonly CancellationTokenSource _shutdown = new();
     private readonly ConcurrentDictionary<string, FileSystemWatcher> _watchers = new();
     private readonly ConcurrentDictionary<string, DateTimeOffset> _processedFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, byte> _generatedOutputs = new(StringComparer.OrdinalIgnoreCase);
 
-    public FolderAutomationService(ConversionQueue queue)
+    public FolderAutomationService(ConversionQueue queue, Func<IReadOnlyList<ConversionPreset>>? getPresets = null)
     {
         _queue = queue;
+        _getPresets = getPresets ?? (() => []);
         _queue.JobUpdated += OnJobUpdated;
     }
 
@@ -32,11 +35,19 @@ public sealed class FolderAutomationService : IDisposable
                 NotifyFilter = NotifyFilters.FileName | NotifyFilters.CreationTime | NotifyFilters.LastWrite
             };
 
-            watcher.Created += async (_, e) => await HandleFileCandidateAsync(rule, e.FullPath);
-            watcher.Renamed += async (_, e) => await HandleFileCandidateAsync(rule, e.FullPath);
+            watcher.Created += async (_, e) => await HandleWatcherEventAsync(rule, e.FullPath);
+            watcher.Renamed += async (_, e) => await HandleWatcherEventAsync(rule, e.FullPath);
             watcher.EnableRaisingEvents = true;
             _watchers[rule.Id] = watcher;
         }
+    }
+
+    private async Task HandleWatcherEventAsync(AutomationRule rule, string path)
+    {
+        try { await HandleFileCandidateAsync(rule, path, _shutdown.Token); }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
+        catch (ObjectDisposedException) when (_shutdown.IsCancellationRequested) { }
+        catch (Exception ex) { System.Diagnostics.Trace.TraceError(ex.ToString()); }
     }
 
     public async Task<ConversionJob?> HandleFileCandidateAsync(AutomationRule rule, string fullPath, CancellationToken ct = default)
@@ -68,20 +79,33 @@ public sealed class FolderAutomationService : IDisposable
         }
 
         // Deduplicate rapid duplicate FileSystemWatcher events
-        if (_processedFiles.TryGetValue(normalizedPath, out var lastSeen) &&
-            (DateTimeOffset.UtcNow - lastSeen) < TimeSpan.FromSeconds(10))
-        {
+        var key = $"{rule.Id}:{normalizedPath}";
+        var now = DateTimeOffset.UtcNow;
+        if (!_processedFiles.TryAdd(key, now) &&
+            (!_processedFiles.TryGetValue(key, out var lastSeen) ||
+                now - lastSeen < TimeSpan.FromSeconds(10) ||
+                !_processedFiles.TryUpdate(key, now, lastSeen)))
             return null;
-        }
-        _processedFiles[normalizedPath] = DateTimeOffset.UtcNow;
 
         // Wait until file finishes copying/writing on disk
         if (!await WaitForFileWriteStabilityAsync(normalizedPath, ct))
             return null;
 
+        ct.ThrowIfCancellationRequested();
+        if (_generatedOutputs.ContainsKey(normalizedPath) || !FormatMatrix.CanConvert(ext, targetNorm, true))
+            return null;
+
+        var preset = _getPresets().FirstOrDefault(p => p.Id == rule.PresetId &&
+            FormatMatrix.NormalizeFormatId(p.TargetFormat) == targetNorm);
         var options = new ConversionOptions(
+            Quality: preset?.Quality ?? 85,
+            LongestEdgePx: preset?.LongestEdgePx,
+            AudioBitrateKbps: preset?.AudioBitrateKbps,
+            StripMetadata: preset?.StripMetadata ?? false,
             ConflictPolicy: rule.ConflictPolicy,
-            CustomOutputDirectory: rule.OutputDirectory
+            CustomOutputDirectory: rule.OutputDirectory,
+            PresetName: preset?.Name,
+            TriggeredBy: $"Automation:{rule.Id}"
         );
 
         return _queue.Enqueue(normalizedPath, targetNorm, options);
@@ -100,6 +124,7 @@ public sealed class FolderAutomationService : IDisposable
         if (!string.IsNullOrWhiteSpace(job.OutputPath))
         {
             RegisterGeneratedOutput(job.OutputPath);
+            foreach (var output in job.AdditionalOutputPaths) RegisterGeneratedOutput(output);
         }
     }
 
@@ -141,6 +166,7 @@ public sealed class FolderAutomationService : IDisposable
 
     public void Dispose()
     {
+        _shutdown.Cancel();
         _queue.JobUpdated -= OnJobUpdated;
         foreach (var watcher in _watchers.Values)
         {

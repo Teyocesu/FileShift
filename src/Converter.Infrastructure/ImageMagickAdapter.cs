@@ -16,7 +16,7 @@ public sealed class ImageMagickAdapter : IConversionEngineAdapter
 
     public async Task<bool> IsAvailableAsync(CancellationToken ct = default)
     {
-        foreach (var candidate in new[] { "magick", "convert" })
+        foreach (var candidate in new[] { ResolveExecutable() })
         {
             try
             {
@@ -32,10 +32,10 @@ public sealed class ImageMagickAdapter : IConversionEngineAdapter
                     }
                 };
                 proc.StartInfo.ArgumentList.Add("-version");
-                proc.Start();
-                await proc.WaitForExitAsync(ct);
+                await EngineProcess.RunAsync(proc, ct);
                 if (proc.ExitCode == 0) return true;
             }
+            catch (OperationCanceledException) { throw; }
             catch
             {
                 // Try next binary name
@@ -123,15 +123,8 @@ public sealed class ImageMagickAdapter : IConversionEngineAdapter
 
         args.Add(outputPath);
 
-        proc.Start();
-        using var reg = ct.Register(() =>
-        {
-            try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
-        });
-
         progress?.Report(65);
-        var stdErr = await proc.StandardError.ReadToEndAsync(ct);
-        await proc.WaitForExitAsync(ct);
+        var (_, stdErr) = await EngineProcess.RunAsync(proc, ct);
 
         if (proc.ExitCode != 0)
         {
@@ -186,9 +179,7 @@ public sealed class ImageMagickAdapter : IConversionEngineAdapter
         proc.StartInfo.ArgumentList.Add("%w %h");
         proc.StartInfo.ArgumentList.Add(imagePath);
 
-        proc.Start();
-        var stdout = await proc.StandardOutput.ReadToEndAsync(ct);
-        await proc.WaitForExitAsync(ct);
+        var (stdout, _) = await EngineProcess.RunAsync(proc, ct);
 
         var parts = stdout.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length >= 2 &&

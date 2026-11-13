@@ -109,6 +109,7 @@ public sealed class ConversionJob
 
 public sealed class UserSettings
 {
+    public int SettingsVersion { get; set; }
     public bool SaveNextToOriginal { get; set; } = true;
     public string CustomOutputDirectory { get; set; } = "";
     public int DefaultQuality { get; set; } = 85;

@@ -14,145 +14,156 @@ public static class SafeFilePolicy
         return Convert.ToHexStringLower(hash);
     }
 
-    /// <summary>
-    /// Resolves the final output path in the target directory according to the configured ConflictPolicy.
-    /// Never overwrites an existing file unless ConflictPolicy.Overwrite is explicitly specified.
-    /// Never returns a path identical to inputPath.
-    /// </summary>
-    public static string? ResolveFinalOutputPath(
-        string inputPath,
-        string targetExtension,
-        string? customOutputDir,
-        ConflictPolicy conflictPolicy)
+    internal static string GetOutputDirectory(string inputPath, string? customOutputDirectory)
+        => Path.GetFullPath(string.IsNullOrWhiteSpace(customOutputDirectory)
+            ? Path.GetDirectoryName(inputPath)!
+            : customOutputDirectory);
+
+    internal static IReadOnlyList<string> PublishOutputs(
+        IReadOnlyList<string> stagedPaths,
+        string outputDirectory,
+        string originalPath,
+        ConflictPolicy policy,
+        Action verifyOriginal,
+        CancellationToken ct)
     {
-        var fullInput = Path.GetFullPath(inputPath);
-        var baseDir = !string.IsNullOrWhiteSpace(customOutputDir)
-            ? Path.GetFullPath(customOutputDir)
-            : Path.GetDirectoryName(fullInput) ?? Directory.GetCurrentDirectory();
-
-        Directory.CreateDirectory(baseDir);
-
-        var stem = Path.GetFileNameWithoutExtension(fullInput);
-        var ext = targetExtension.TrimStart('.').ToLowerInvariant();
-        if (ext == "jpeg") ext = "jpg";
-
-        var candidate = Path.Combine(baseDir, $"{stem}.{ext}");
-
-        // INV-01: Never allow output path to equal input path even if extensions match
-        if (PathsEqual(candidate, fullInput))
+        // Serialize cooperating publishers, including independent CLI invocations on Windows.
+        using var mutex = new Mutex(false, "FileShift.OutputPublication");
+        while (true)
         {
-            candidate = Path.Combine(baseDir, $"{stem} (converted).{ext}");
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                if (mutex.WaitOne(50)) break;
+            }
+            catch (AbandonedMutexException)
+            {
+                break; // The OS granted ownership. Existing recovery files stay on disk.
+            }
         }
 
-        if (!File.Exists(candidate))
-        {
-            return candidate;
-        }
-
-        return conflictPolicy switch
-        {
-            ConflictPolicy.Skip => null,
-            ConflictPolicy.Overwrite => candidate,
-            ConflictPolicy.AutoRename or _ => FindNextAvailablePath(baseDir, stem, ext, fullInput)
-        };
-    }
-
-    public static string CreateTemporaryOutputPath(string finalOutputPath, string jobId)
-    {
-        var dir = Path.GetDirectoryName(Path.GetFullPath(finalOutputPath)) ?? Path.GetTempPath();
-        Directory.CreateDirectory(dir);
-        var ext = Path.GetExtension(finalOutputPath);
-        return Path.Combine(dir, $".fileshift.tmp.{jobId}{ext}");
-    }
-
-    /// <summary>
-    /// Atomically publishes a pre-validated temporary output file to finalOutputPath.
-    /// If overwriting an existing destination file, backs up the existing file first and restores it
-    /// if the atomic move fails, ensuring a pre-existing valid file is never lost.
-    /// </summary>
-    public static void PublishValidatedAtomicOutput(string validatedTempFilePath, string finalOutputPath, ConflictPolicy policy)
-    {
-        if (!File.Exists(validatedTempFilePath))
-        {
-            throw new IOException("El archivo temporal validado no existe.");
-        }
-
-        var info = new FileInfo(validatedTempFilePath);
-        if (info.Length == 0)
-        {
-            SafeDeleteTemp(validatedTempFilePath);
-            throw new IOException("El archivo temporal tiene 0 bytes; publicación abortada.");
-        }
-
-        bool destinationExists = File.Exists(finalOutputPath);
-        if (destinationExists && policy != ConflictPolicy.Overwrite)
-        {
-            SafeDeleteTemp(validatedTempFilePath);
-            throw new IOException("El archivo de destino ya existe y la política actual prohíbe sobrescribir.");
-        }
-
-        string? backupPath = null;
         try
         {
-            if (destinationExists && policy == ConflictPolicy.Overwrite)
+            var published = new List<(string Path, string? Backup)>();
+            try
             {
-                backupPath = $"{finalOutputPath}.fileshift.bak.{Guid.NewGuid():N}";
-                File.Copy(finalOutputPath, backupPath, overwrite: true);
+                foreach (var stagedPath in stagedPaths)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var destination = Path.Combine(outputDirectory, Path.GetFileName(stagedPath));
+                    if (string.Equals(destination, originalPath, StringComparison.OrdinalIgnoreCase))
+                        throw new IOException("El destino coincide con el archivo original.");
+
+                    var candidate = destination;
+                    for (var suffix = 1; ; suffix++)
+                    {
+                        if (Path.Exists(candidate))
+                        {
+                            if (policy == ConflictPolicy.Skip)
+                            {
+                                RollBack(published);
+                                verifyOriginal();
+                                return [];
+                            }
+
+                            if (policy == ConflictPolicy.Overwrite)
+                            {
+                                if (!File.Exists(candidate))
+                                    throw new IOException($"El destino no es un archivo: {candidate}");
+
+                                var backup = Path.Combine(outputDirectory, $".fileshift.bak.{Guid.NewGuid():N}");
+                                // If replacement itself fails, retain any backup the OS created.
+                                try
+                                {
+                                    File.Replace(stagedPath, candidate, backup);
+                                }
+                                catch (IOException ex) when (File.Exists(backup))
+                                {
+                                    if (!Path.Exists(candidate))
+                                    {
+                                        try { File.Move(backup, candidate); }
+                                        catch (IOException) { }
+                                        catch (UnauthorizedAccessException) { }
+                                    }
+                                    if (File.Exists(backup))
+                                        throw new IOException($"No se pudo reemplazar {candidate}. Respaldo: {backup}", ex);
+                                    throw;
+                                }
+                                published.Add((candidate, backup));
+                                break;
+                            }
+
+                            candidate = Path.Combine(outputDirectory,
+                                $"{Path.GetFileNameWithoutExtension(destination)} ({suffix}){Path.GetExtension(destination)}");
+                            continue;
+                        }
+
+                        try
+                        {
+                            File.Move(stagedPath, candidate);
+                            published.Add((candidate, null));
+                            break;
+                        }
+                        catch (IOException) when (Path.Exists(candidate))
+                        {
+                            suffix--;
+                        }
+                    }
+                }
+
+                verifyOriginal();
+                ct.ThrowIfCancellationRequested();
+            }
+            catch (Exception ex)
+            {
+                try { RollBack(published); }
+                catch (IOException rollbackFailure)
+                {
+                    throw new IOException(rollbackFailure.Message, new AggregateException(ex, rollbackFailure));
+                }
+                throw;
             }
 
-            File.Move(validatedTempFilePath, finalOutputPath, overwrite: policy == ConflictPolicy.Overwrite);
-
-            if (backupPath is not null)
-            {
-                SafeDeleteTemp(backupPath);
-            }
+            foreach (var (_, backup) in published)
+                SafeDeleteTemp(backup);
+            return published.Select(output => output.Path).ToArray();
         }
-        catch
+        finally
         {
-            if (backupPath is not null && File.Exists(backupPath) && !File.Exists(finalOutputPath))
-            {
-                try { File.Move(backupPath, finalOutputPath, overwrite: true); } catch { }
-            }
-            SafeDeleteTemp(backupPath);
-            throw;
+            mutex.ReleaseMutex();
         }
+    }
+
+    private static void RollBack(List<(string Path, string? Backup)> published)
+    {
+        var failures = new List<string>();
+        for (var index = published.Count - 1; index >= 0; index--)
+        {
+            var (path, backup) = published[index];
+            try
+            {
+                if (backup is null)
+                    File.Delete(path);
+                else
+                    File.Move(backup, path, overwrite: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                failures.Add(backup is null
+                    ? $"No se pudo retirar {path}: {ex.Message}"
+                    : $"No se pudo restaurar {path}. Respaldo conservado: {backup}. {ex.Message}");
+            }
+        }
+        published.Clear();
+        if (failures.Count > 0)
+            throw new IOException(string.Join(Environment.NewLine, failures));
     }
 
     public static void SafeDeleteTemp(string? tempFilePath)
     {
         if (string.IsNullOrWhiteSpace(tempFilePath)) return;
-        try
-        {
-            if (File.Exists(tempFilePath))
-            {
-                File.Delete(tempFilePath);
-            }
-        }
-        catch
-        {
-            // Ignore cleanup errors on locked handles
-        }
-    }
-
-    private static bool PathsEqual(string pathA, string pathB)
-    {
-        var comparison = OperatingSystem.IsWindows()
-            ? StringComparison.OrdinalIgnoreCase
-            : StringComparison.Ordinal;
-        return string.Equals(Path.GetFullPath(pathA), Path.GetFullPath(pathB), comparison);
-    }
-
-    private static string FindNextAvailablePath(string directory, string stem, string ext, string fullInput)
-    {
-        for (int index = 1; index < 10_000; index++)
-        {
-            var candidate = Path.Combine(directory, $"{stem} ({index}).{ext}");
-            if (!File.Exists(candidate) && !PathsEqual(candidate, fullInput))
-            {
-                return candidate;
-            }
-        }
-        var uniqueSuffix = Guid.NewGuid().ToString("N")[..6];
-        return Path.Combine(directory, $"{stem} ({uniqueSuffix}).{ext}");
+        try { File.Delete(tempFilePath); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 }

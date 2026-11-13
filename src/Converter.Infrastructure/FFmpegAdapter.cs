@@ -24,10 +24,10 @@ public sealed class FFmpegAdapter : IConversionEngineAdapter
                 }
             };
             proc.StartInfo.ArgumentList.Add("-version");
-            proc.Start();
-            await proc.WaitForExitAsync(ct);
+            await EngineProcess.RunAsync(proc, ct);
             return proc.ExitCode == 0;
         }
+        catch (OperationCanceledException) { throw; }
         catch
         {
             return false;
@@ -156,28 +156,19 @@ public sealed class FFmpegAdapter : IConversionEngineAdapter
 
         args.Add(tempOutputPath);
 
-        proc.Start();
-        using var reg = ct.Register(() =>
+        var (_, stdErr) = await EngineProcess.RunAsync(proc, ct, async output =>
         {
-            try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
-        });
-
-        var stdErrTask = proc.StandardError.ReadToEndAsync(ct);
-
-        while (await proc.StandardOutput.ReadLineAsync(ct) is { } line)
-        {
-            if (durationSeconds is > 0 && line.StartsWith("out_time_ms=", StringComparison.Ordinal))
+            while (await output.ReadLineAsync() is { } line)
             {
-                if (long.TryParse(line.AsSpan("out_time_ms=".Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out long us))
+                if (durationSeconds is > 0 && line.StartsWith("out_time_ms=", StringComparison.Ordinal) &&
+                    long.TryParse(line.AsSpan("out_time_ms=".Length), NumberStyles.Integer, CultureInfo.InvariantCulture, out long us))
                 {
                     double pct = (us / 1_000_000.0) / durationSeconds.Value * 100.0;
                     progress?.Report(Math.Clamp(pct, 1, 99));
                 }
             }
-        }
-
-        await proc.WaitForExitAsync(ct);
-        var stdErr = await stdErrTask;
+            return string.Empty;
+        });
 
         if (proc.ExitCode != 0)
         {
@@ -206,9 +197,7 @@ public sealed class FFmpegAdapter : IConversionEngineAdapter
             args.Add("-of"); args.Add("default=noprint_wrappers=1:nokey=1");
             args.Add(inputPath);
 
-            proc.Start();
-            var output = await proc.StandardOutput.ReadToEndAsync(ct);
-            await proc.WaitForExitAsync(ct);
+            var (output, _) = await EngineProcess.RunAsync(proc, ct);
 
             if (proc.ExitCode == 0 &&
                 double.TryParse(output.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out double seconds) &&
@@ -217,6 +206,7 @@ public sealed class FFmpegAdapter : IConversionEngineAdapter
                 return seconds;
             }
         }
+        catch (OperationCanceledException) { throw; }
         catch
         {
             // Ignore probe errors if stream has no duration header

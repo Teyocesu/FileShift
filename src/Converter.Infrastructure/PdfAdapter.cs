@@ -10,7 +10,7 @@ public sealed class PdfAdapter : IConversionEngineAdapter
 
     public async Task<bool> IsAvailableAsync(CancellationToken ct = default)
     {
-        foreach (var bin in new[] { "gs", "gswin64c" })
+        foreach (var bin in new[] { OperatingSystem.IsWindows() ? "gswin64c" : "gs" })
         {
             try
             {
@@ -26,10 +26,10 @@ public sealed class PdfAdapter : IConversionEngineAdapter
                     }
                 };
                 proc.StartInfo.ArgumentList.Add("--version");
-                proc.Start();
-                await proc.WaitForExitAsync(ct);
+                await EngineProcess.RunAsync(proc, ct);
                 if (proc.ExitCode == 0) return true;
             }
+            catch (OperationCanceledException) { throw; }
             catch
             {
                 // Continue checking next binary
@@ -56,49 +56,13 @@ public sealed class PdfAdapter : IConversionEngineAdapter
         await RenderPdfPageAsync(gsBinary, device, job.InputPath, firstPage, tempOutputPath, ct);
         progress?.Report(65);
 
-        // If multi-page PDF and range spans multiple pages, render pages 2..N atomically as well
-        if (lastPage > firstPage)
+        for (int page = firstPage + 1; page <= lastPage; page++)
         {
-            var targetExt = FormatMatrix.Formats[target].Extension;
-            var outputDir = string.IsNullOrWhiteSpace(job.Options.CustomOutputDirectory)
-                ? (Path.GetDirectoryName(job.InputPath) ?? Environment.CurrentDirectory)
-                : job.Options.CustomOutputDirectory;
-            var baseStem = Path.GetFileNameWithoutExtension(job.InputPath);
-
-            for (int page = firstPage + 1; page <= lastPage; page++)
-            {
-                ct.ThrowIfCancellationRequested();
-                var pageInputDummy = Path.Combine(outputDir, $"{baseStem}_p{page}.pdf");
-                var pageFinalPath = SafeFilePolicy.ResolveFinalOutputPath(
-                    pageInputDummy,
-                    targetExt,
-                    outputDir,
-                    job.Options.ConflictPolicy)
-                    ?? throw new InvalidOperationException($"El archivo de página {page} fue omitido por política de conflicto.");
-
-                var pageTemp = SafeFilePolicy.CreateTemporaryOutputPath(pageFinalPath, $"{job.Id}_p{page}");
-                try
-                {
-                    await RenderPdfPageAsync(gsBinary, device, job.InputPath, page, pageTemp, ct);
-                    var inspection = MagicByteInspector.InspectFile(pageTemp);
-                    if (!inspection.IsValid || FormatMatrix.NormalizeFormatId(inspection.DetectedFormat) != target)
-                    {
-                        throw new InvalidDataException($"La página {page} del PDF no generó una imagen '{target}' válida.");
-                    }
-
-                    SafeFilePolicy.PublishValidatedAtomicOutput(
-                        pageTemp,
-                        pageFinalPath,
-                        job.Options.ConflictPolicy);
-
-                    job.AdditionalOutputPaths.Add(pageFinalPath);
-                }
-                catch
-                {
-                    SafeFilePolicy.SafeDeleteTemp(pageTemp);
-                    throw;
-                }
-            }
+            ct.ThrowIfCancellationRequested();
+            var stem = Path.GetFileNameWithoutExtension(tempOutputPath);
+            var extension = Path.GetExtension(tempOutputPath);
+            var pageTemp = Path.Combine(Path.GetDirectoryName(tempOutputPath)!, $"{stem}_p{page}{extension}");
+            await RenderPdfPageAsync(gsBinary, device, job.InputPath, page, pageTemp, ct);
         }
 
         progress?.Report(95);
@@ -150,15 +114,7 @@ public sealed class PdfAdapter : IConversionEngineAdapter
         args.Add("-sDEVICE=nullpage");
         args.Add(inputPath);
 
-        proc.Start();
-        using var reg = ct.Register(() =>
-        {
-            try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
-        });
-
-        var stdout = await proc.StandardOutput.ReadToEndAsync(ct);
-        var stderr = await proc.StandardError.ReadToEndAsync(ct);
-        await proc.WaitForExitAsync(ct);
+        var (stdout, stderr) = await EngineProcess.RunAsync(proc, ct);
 
         var combined = $"{stdout}\n{stderr}";
         if (proc.ExitCode != 0 ||
@@ -205,18 +161,10 @@ public sealed class PdfAdapter : IConversionEngineAdapter
         args.Add("-r150");
         args.Add($"-dFirstPage={pageNumber}");
         args.Add($"-dLastPage={pageNumber}");
-        args.Add($"-sOutputFile={outputPath}");
+        args.Add($"-sOutputFile={outputPath.Replace("%", "%%")}");
         args.Add(inputPath);
 
-        proc.Start();
-        using var reg = ct.Register(() =>
-        {
-            try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
-        });
-
-        var stdout = await proc.StandardOutput.ReadToEndAsync(ct);
-        var stdErr = await proc.StandardError.ReadToEndAsync(ct);
-        await proc.WaitForExitAsync(ct);
+        var (stdout, stdErr) = await EngineProcess.RunAsync(proc, ct);
 
         if (proc.ExitCode != 0 ||
             stdout.Contains("Error:", StringComparison.OrdinalIgnoreCase) ||

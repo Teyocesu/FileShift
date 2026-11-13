@@ -59,10 +59,7 @@ public sealed class OutputIntegrityValidator : IOutputIntegrityValidator
             proc.StartInfo.ArgumentList.Add("%m %wx%h\\n");
             proc.StartInfo.ArgumentList.Add(filePath);
 
-            proc.Start();
-            var stdout = await proc.StandardOutput.ReadToEndAsync(ct);
-            var stderr = await proc.StandardError.ReadToEndAsync(ct);
-            await proc.WaitForExitAsync(ct);
+            var (stdout, stderr) = await EngineProcess.RunAsync(proc, ct);
 
             if (proc.ExitCode != 0 || string.IsNullOrWhiteSpace(stdout))
             {
@@ -75,6 +72,7 @@ public sealed class OutputIntegrityValidator : IOutputIntegrityValidator
             var firstLine = stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "";
             return new OutputValidationResult(true, firstLine, null);
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             return new OutputValidationResult(false, null, $"Error ejecutando validador de imagen: {ex.Message}");
@@ -109,10 +107,7 @@ public sealed class OutputIntegrityValidator : IOutputIntegrityValidator
             args.Add("default=noprint_wrappers=1");
             args.Add(filePath);
 
-            proc.Start();
-            var stdout = await proc.StandardOutput.ReadToEndAsync(ct);
-            var stderr = await proc.StandardError.ReadToEndAsync(ct);
-            await proc.WaitForExitAsync(ct);
+            var (stdout, stderr) = await EngineProcess.RunAsync(proc, ct);
 
             if (proc.ExitCode != 0)
             {
@@ -141,6 +136,7 @@ public sealed class OutputIntegrityValidator : IOutputIntegrityValidator
 
             return new OutputValidationResult(true, summary, null);
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             return new OutputValidationResult(false, null, $"Error ejecutando ffprobe: {ex.Message}");
@@ -173,10 +169,7 @@ public sealed class OutputIntegrityValidator : IOutputIntegrityValidator
             args.Add("-sDEVICE=nullpage");
             args.Add(filePath);
 
-            proc.Start();
-            var stdout = await proc.StandardOutput.ReadToEndAsync(ct);
-            var stderr = await proc.StandardError.ReadToEndAsync(ct);
-            await proc.WaitForExitAsync(ct);
+            var (stdout, stderr) = await EngineProcess.RunAsync(proc, ct);
 
             if (proc.ExitCode != 0 ||
                 stdout.Contains("Error:", StringComparison.OrdinalIgnoreCase) ||
@@ -194,6 +187,7 @@ public sealed class OutputIntegrityValidator : IOutputIntegrityValidator
 
             return new OutputValidationResult(true, $"PDF válido ({Math.Max(1, pageCount)} pág.)", null);
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             return new OutputValidationResult(false, null, $"Error validando PDF con Ghostscript: {ex.Message}");

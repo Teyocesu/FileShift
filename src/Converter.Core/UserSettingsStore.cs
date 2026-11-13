@@ -51,6 +51,14 @@ public static class UserSettingsStore
                 if (loaded is not null)
                 {
                     EnsureDefaultFavorites(loaded);
+                    if (loaded.SettingsVersion == 0)
+                    {
+                        loaded.Automations = loaded.Automations.Select(rule =>
+                            rule.Id is "rule-screenshots-webp" or "rule-recordings-mp4"
+                                ? rule with { Enabled = false, LastResult = "Activación manual requerida" }
+                                : rule).ToList();
+                        Save(loaded);
+                    }
                     WriteMenuCacheForShellExtension(loaded);
                     return loaded;
                 }
@@ -68,6 +76,7 @@ public static class UserSettingsStore
 
     public static void Save(UserSettings settings)
     {
+        settings.SettingsVersion = 1;
         EnsureDefaultFavorites(settings);
         var path = GetSettingsFilePath();
         var tempPath = $"{path}.tmp.{Guid.NewGuid():N}";
@@ -116,6 +125,14 @@ public static class UserSettingsStore
         File.Move(tempCache, cachePath, overwrite: true);
     }
 
+    public static void WriteShellConversionMatrix(IEnumerable<string> entries)
+    {
+        var path = Path.Combine(GetConfigDirectory(), "menu-formats.txt");
+        var temporary = $"{path}.tmp.{Guid.NewGuid():N}";
+        File.WriteAllLines(temporary, entries);
+        File.Move(temporary, path, overwrite: true);
+    }
+
     public static UserSettings CreateDefaultSettings()
     {
         var settings = new UserSettings();
@@ -135,7 +152,7 @@ public static class UserSettingsStore
             new AutomationRule(
                 Id: "rule-screenshots-webp",
                 Name: "Capturas PNG → WebP",
-                Enabled: true,
+                Enabled: false,
                 SourceDirectory: screenshotsDir,
                 AllowedInputFormats: ["png"],
                 TargetFormat: "webp",
@@ -143,12 +160,12 @@ public static class UserSettingsStore
                 OutputDirectory: null,
                 ConflictPolicy: ConflictPolicy.AutoRename,
                 CopyConvertedFile: true,
-                LastResult: "Vigilando carpeta activamente (sin bucles)"
+                LastResult: "Activación manual requerida"
             ),
             new AutomationRule(
                 Id: "rule-recordings-mp4",
                 Name: "Grabaciones MKV/WebM → MP4",
-                Enabled: true,
+                Enabled: false,
                 SourceDirectory: capturesDir,
                 AllowedInputFormats: ["mkv", "webm", "mov"],
                 TargetFormat: "mp4",
@@ -156,7 +173,7 @@ public static class UserSettingsStore
                 OutputDirectory: null,
                 ConflictPolicy: ConflictPolicy.AutoRename,
                 CopyConvertedFile: false,
-                LastResult: "Vigilando carpeta activamente"
+                LastResult: "Activación manual requerida"
             )
         ];
 

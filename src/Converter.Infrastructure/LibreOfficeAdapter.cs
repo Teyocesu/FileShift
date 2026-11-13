@@ -64,8 +64,7 @@ public sealed class LibreOfficeAdapter : IConversionEngineAdapter
             args.Add(workDir);
             args.Add(job.InputPath);
 
-            proc.Start();
-            await proc.WaitForExitAsync(ct);
+            await EngineProcess.RunAsync(proc, ct);
 
             var expectedPdf = Path.Combine(workDir, $"{Path.GetFileNameWithoutExtension(job.InputPath)}.pdf");
             if (proc.ExitCode != 0 || !File.Exists(expectedPdf))

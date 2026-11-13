@@ -390,6 +390,89 @@ public sealed class ConversionPipelineTests
         }
     }
 
+    private sealed class RejectOutputValidator : IOutputIntegrityValidator
+    {
+        public Task<OutputValidationResult> ValidateOutputAsync(string filePath, string targetFormatId, CancellationToken ct = default)
+            => Task.FromResult(new OutputValidationResult(false, null, "Salida rechazada para la prueba"));
+    }
+
+    [Fact]
+    public async Task Pdf_Overwrite_WhenValidationFails_PreservesEveryExistingPage()
+    {
+        var directory = Directory.CreateTempSubdirectory("fileshift-pdf-");
+        try
+        {
+            var input = Path.Combine(directory.FullName, "multipage.pdf");
+            await CreateMultiPagePdfAsync(input);
+            var originalHash = await SafeFilePolicy.ComputeSha256Async(input);
+            var first = Path.Combine(directory.FullName, "multipage.png");
+            var second = Path.Combine(directory.FullName, "multipage_p2.png");
+            await File.WriteAllTextAsync(first, "first original");
+            await File.WriteAllTextAsync(second, "second original");
+
+            using var queue = new ConversionQueue([new PdfAdapter()], validator: new RejectOutputValidator());
+            var job = queue.Enqueue(input, "png", new ConversionOptions(ConflictPolicy: ConflictPolicy.Overwrite));
+            var finished = await queue.WaitForJobAsync(job.Id).WaitAsync(TimeSpan.FromSeconds(30));
+
+            Assert.Equal(JobStatus.Failed, finished.Status);
+            Assert.Equal("Salida rechazada para la prueba", finished.ErrorMessage);
+            Assert.Equal("first original", await File.ReadAllTextAsync(first));
+            Assert.Equal("second original", await File.ReadAllTextAsync(second));
+            Assert.Equal(originalHash, await SafeFilePolicy.ComputeSha256Async(input));
+            Assert.Empty(finished.AdditionalOutputPaths);
+            Assert.Empty(directory.GetFileSystemInfos(".fileshift.*"));
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(ConflictPolicy.Overwrite, JobStatus.Failed)]
+    [InlineData(ConflictPolicy.Skip, JobStatus.Completed)]
+    [InlineData(ConflictPolicy.AutoRename, JobStatus.Completed)]
+    public async Task Pdf_SecondaryCollision_AppliesPolicyToWholeJob(ConflictPolicy policy, JobStatus expected)
+    {
+        var directory = Directory.CreateTempSubdirectory("fileshift-collision-");
+        try
+        {
+            var input = Path.Combine(directory.FullName, "multipage.pdf");
+            await CreateMultiPagePdfAsync(input);
+            var first = Path.Combine(directory.FullName, "multipage.png");
+            var second = Path.Combine(directory.FullName, "multipage_p2.png");
+            await File.WriteAllTextAsync(first, "preexisting");
+            Directory.CreateDirectory(second);
+            await File.WriteAllTextAsync(Path.Combine(second, "keep.txt"), "directory contents");
+
+            using var queue = new ConversionQueue([new PdfAdapter()], validator: new OutputIntegrityValidator());
+            var job = queue.Enqueue(input, "png", new ConversionOptions(ConflictPolicy: policy));
+            var finished = await queue.WaitForJobAsync(job.Id).WaitAsync(TimeSpan.FromSeconds(30));
+
+            Assert.Equal(expected, finished.Status);
+            Assert.True(finished.OriginalIntactVerified);
+            Assert.Equal("preexisting", await File.ReadAllTextAsync(first));
+            Assert.Equal("directory contents", await File.ReadAllTextAsync(Path.Combine(second, "keep.txt")));
+            Assert.Empty(directory.GetFileSystemInfos(".fileshift.*"));
+            if (policy == ConflictPolicy.AutoRename)
+            {
+                Assert.EndsWith("multipage (1).png", finished.OutputPath);
+                Assert.EndsWith("multipage_p2 (1).png", Assert.Single(finished.AdditionalOutputPaths));
+                Assert.True(File.Exists(finished.OutputPath));
+                Assert.True(File.Exists(finished.AdditionalOutputPaths[0]));
+            }
+            else
+            {
+                Assert.Null(finished.OutputPath);
+                Assert.Empty(finished.AdditionalOutputPaths);
+            }
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
     [Fact]
     public void UserSettingsStore_PersistsSettings_AndGeneratesMenuCacheForExplorerShell()
     {
