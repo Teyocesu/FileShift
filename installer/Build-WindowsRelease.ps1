@@ -19,7 +19,6 @@ $root = (Resolve-Path "$PSScriptRoot/..").Path
 $output = Join-Path $root 'dist/win-x64'
 $installer = Join-Path $root 'dist/installer'
 $stage = Join-Path $root 'dist/identity'
-$verified = Join-Path $root 'dist/identity-verified'
 $shellBuild = Join-Path $root 'dist/shell'
 $sdk = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/makeappx.exe" |
     Sort-Object { [version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1
@@ -28,7 +27,7 @@ $signTool = Join-Path $sdk.DirectoryName 'signtool.exe'
 $mt = Join-Path $sdk.DirectoryName 'mt.exe'
 $iscc = (Get-Command ISCC.exe).Source
 
-foreach ($path in @($output, $installer, $stage, $verified)) {
+foreach ($path in @($output, $installer, $stage)) {
     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
 }
 New-Item -ItemType Directory -Path $output, $installer, $stage | Out-Null
@@ -89,14 +88,19 @@ try {
     if ($TimestampUrl) { $signature += @('/tr', $TimestampUrl, '/td', 'SHA256') }
     Invoke-Checked $signTool ($signature + $msix)
     if (!$Development) { Invoke-Checked $signTool @('verify', '/pa', $msix) }
-    Invoke-Checked $sdk.FullName @('unpack', '/p', $msix, '/d', $verified)
     $archive = [IO.Compression.ZipFile]::OpenRead($msix)
     try {
-        if (!$archive.GetEntry('AppxSignature.p7x')) { throw 'El paquete MSIX no contiene firma.' }
+        foreach ($entryName in @('AppxSignature.p7x', 'AppxBlockMap.xml', 'AppxManifest.xml')) {
+            if (!$archive.GetEntry($entryName)) { throw "El MSIX no contiene $entryName." }
+        }
+        $embeddedManifest = $archive.GetEntry('AppxManifest.xml').Open()
+        try {
+            $expectedHash = (Get-FileHash "$stage/AppxManifest.xml").Hash
+            if ((Get-FileHash -InputStream $embeddedManifest).Hash -ne $expectedHash) {
+                throw 'El manifiesto del MSIX no coincide.'
+            }
+        } finally { $embeddedManifest.Dispose() }
     } finally { $archive.Dispose() }
-    if ((Get-FileHash "$stage/AppxManifest.xml").Hash -ne (Get-FileHash "$verified/AppxManifest.xml").Hash) {
-        throw 'El manifiesto extraído no coincide.'
-    }
     $previousConfig = $env:FILESHIFT_CONFIG_DIR
     $env:FILESHIFT_CONFIG_DIR = Join-Path $root 'dist/smoke-settings'
     Invoke-Checked "$output/fileshift.exe" @('doctor')

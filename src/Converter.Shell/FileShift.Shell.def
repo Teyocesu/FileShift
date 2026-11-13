@@ -1,4 +1,4 @@
-LIBRARY "FileShift.Shell"
+LIBRARY "FileShift.Shell.dll"
 EXPORTS
     DllCanUnloadNow     PRIVATE
     DllGetClassObject   PRIVATE
